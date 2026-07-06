@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+<title>CCE Player</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0e14; display: grid; place-items: center; overflow: hidden; }
+  #game { box-shadow: 0 12px 60px rgba(0,0,0,.6); border-radius: 8px; overflow: hidden; }
+  #err { color: #ff6b6b; font: 14px/1.5 monospace; max-width: 600px; padding: 20px; }
+</style>
+</head>
+<body>
+<div id="game"></div>
+<script type="module">
+  import { startGame } from './engine/index.js';
+
+  const params = new URLSearchParams(location.search);
+  const url = params.get('project') || 'projects/casino-calculator.json';
+  const mount = document.getElementById('game');
+
+  function fit(w, h) {
+    const scale = Math.min(innerWidth / w, innerHeight / h, 1.5) * 0.96;
+    mount.style.width = w * scale + 'px';
+    mount.style.height = h * scale + 'px';
+  }
+
+  try {
+    const project = await (await fetch(url)).json();
+    const s = project.settings || {};
+    fit(s.width || 480, s.height || 720);
+    addEventListener('resize', () => fit(s.width || 480, s.height || 720));
+    document.title = project.name || 'CCE Player';
+    window.game = startGame(project, mount); // exposed for debugging
+  } catch (e) {
+    mount.innerHTML = `<div id="err">Failed to load project "${url}"<br><br>${e.message}</div>`;
+  }
+</script>
+</body>
+</html>

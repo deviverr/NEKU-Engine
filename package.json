@@ -1,0 +1,13 @@
+{
+  "name": "casino-calculator-engine",
+  "version": "0.1.0",
+  "description": "CCE — a zero-dependency 2D/3D web game engine with a browser editor. Games export to a single HTML file.",
+  "type": "module",
+  "license": "MIT",
+  "repository": "github:deviverr/Casino-Calculator-Engine",
+  "scripts": {
+    "start": "node tools/serve.js",
+    "sample": "node tools/build-sample.js",
+    "export": "node tools/export.js projects/casino-calculator.json dist/casino-calculator.html"
+  }
+}
