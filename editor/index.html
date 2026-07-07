@@ -39,7 +39,7 @@
 
   <div id="helpOverlay" hidden>
     <div id="helpBox">
-      <div class="panel-tools"><b>NEKU CHEATSHEET</b><span class="flex"></span><button id="btnHelpClose">✕</button></div>
+      <div class="panel-tools"><b>NEKU CHEATSHEET</b><span class="flex"></span><button id="btnHelpClose" data-help-close title="Close cheatsheet">✕</button></div>
       <div id="helpContent" class="fill-scroll">
         <h4>Script hooks</h4>
         <pre>function ready() {}              // node entered the scene
@@ -76,6 +76,7 @@ syntax errors live · Output panel logs exports</pre>
         <pre>Cmd/Ctrl+Enter play · Cmd/Ctrl+Z undo · Shift+drag snap
 arrows nudge · Del delete · double-click rename
 Timeline: scrub, edit node, ◆ Key · double-click row = key that track</pre>
+        <div class="help-actions"><button data-help-close class="accent">Back to editor</button></div>
       </div>
     </div>
   </div>

@@ -23,6 +23,7 @@ live team co-op, CRT effects, and single-file exports. Mascot: **cwat** `>w<`.
 | **Co-op** | Roblox-style Team Create: `npm run coop`, teammates join with the ◉ Co-op button, colored live selections. Zero-dependency WebSocket server. |
 | **Looks** | 7 pixel themes + a custom theme editor (shareable `.nkt` files), CRT post-FX (curvature/scanlines/vignette/glow/aberration), synthesized SFX — games ship no audio files. |
 | **Extendable** | `.nkx` plugins add themes, templates, and tools to the Studio via a tiny `neku.register*` API. |
+| **Local sessions** | Autosave, recents, themes, plugins, layouts, and co-op defaults are scoped per client/session so one hosted Studio does not stomp another. |
 
 ## Quick start
 

@@ -9,6 +9,8 @@
 // Sources persist in localStorage and run on every Studio start.
 // Plugins run with full editor access — only load .nkx files you trust.
 
+import { getJson, setJson } from './session.js';
+
 export class PluginHost {
   constructor(ed) {
     this.ed = ed;
@@ -17,7 +19,7 @@ export class PluginHost {
     this.tools = [];     // { label, fn, plugin }
     this.handlers = {};  // event -> [fn]
     this.errors = [];    // { plugin, message }
-    this.sources = JSON.parse(localStorage.getItem('neku-plugins') || '{}');
+    this.sources = getJson('neku-plugins', {});
     this.onRegistry = null; // editor refresh callback
   }
 
@@ -58,13 +60,13 @@ export class PluginHost {
 
   add(name, src) {
     this.sources[name] = src;
-    localStorage.setItem('neku-plugins', JSON.stringify(this.sources));
+    setJson('neku-plugins', this.sources);
     this._run(name, src);
   }
 
   remove(name) {
     delete this.sources[name];
-    localStorage.setItem('neku-plugins', JSON.stringify(this.sources));
+    setJson('neku-plugins', this.sources);
     // registrations live until reload; cheap and honest:
     return 'Removed. Reload the Studio to fully unload it.';
   }

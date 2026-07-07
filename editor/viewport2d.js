@@ -1,6 +1,8 @@
 // Neku Studio — 2D scene viewport: pan/zoom, pick, drag-move, tilemap
 // painting, live peer selection outlines.
 
+import { getLocal } from './session.js';
+
 import { drawNode } from '../engine/renderer2d.js';
 
 export class Viewport2D {
@@ -187,7 +189,7 @@ export class Viewport2D {
     const line = 'rgba(128,128,160,0.12)';
     octx.strokeStyle = line;
     octx.lineWidth = 1 / cam.zoom;
-    const step = Math.max(8, +localStorage.getItem('neku-grid') || 40);
+    const step = Math.max(8, +getLocal('neku-grid', 40) || 40);
     for (let x = 0; x <= W; x += step) this._line(octx, x, 0, x, H);
     for (let y = 0; y <= H; y += step) this._line(octx, 0, y, W, y);
     octx.strokeStyle = accent;

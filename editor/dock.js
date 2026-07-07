@@ -1,6 +1,8 @@
 // Neku Studio dock — tabbed panel zones with drag-to-move and resizable
 // splitters. Zones: left / right / bottom (tab stacks) + center (viewports).
 
+import { getJson, setJson } from './session.js';
+
 export class Dock {
   constructor(root) {
     this.root = root;
@@ -17,7 +19,7 @@ export class Dock {
     for (const z of root.querySelectorAll('.zone')) this.zones[z.dataset.zone] = z;
     this._initSplitters();
     this._initDrops();
-    this.layout = JSON.parse(localStorage.getItem('neku-dock') || '{}');
+    this.layout = getJson('neku-dock', {});
   }
 
   center() {
@@ -93,7 +95,7 @@ export class Dock {
       }
     }
     this.layout[id] = zoneName;
-    localStorage.setItem('neku-dock', JSON.stringify(this.layout));
+    setJson('neku-dock', this.layout);
   }
 
   _initDrops() {
@@ -118,7 +120,7 @@ export class Dock {
   }
 
   _initSplitters() {
-    const saved = JSON.parse(localStorage.getItem('neku-dock-sizes') || '{}');
+    const saved = getJson('neku-dock-sizes', {});
     const vars = { v: '--zw-left', v2: '--zw-right', h: '--zh-bottom' };
     for (const [dir, v] of Object.entries(vars)) {
       if (saved[dir]) this.root.style.setProperty(v, saved[dir] + 'px');
@@ -143,7 +145,7 @@ export class Dock {
         const onUp = () => {
           sp.removeEventListener('pointermove', onMove);
           sp.removeEventListener('pointerup', onUp);
-          localStorage.setItem('neku-dock-sizes', JSON.stringify(saved));
+          setJson('neku-dock-sizes', saved);
         };
         sp.addEventListener('pointermove', onMove);
         sp.addEventListener('pointerup', onUp);
