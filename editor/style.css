@@ -412,6 +412,10 @@ input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accen
   display: grid;
   place-items: center;
 }
+#helpOverlay[hidden] {
+  display: none !important;
+  pointer-events: none;
+}
 #helpBox {
   width: min(680px, 92vw);
   max-height: 84vh;
@@ -420,6 +424,12 @@ input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accen
   box-shadow: 6px 6px 0 var(--shadow);
   display: flex;
   flex-direction: column;
+}
+#helpBox .panel-tools {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg3);
 }
 #helpContent { padding: 4px 14px 14px; }
 #helpContent h4 {
@@ -438,6 +448,14 @@ input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accen
   overflow-x: auto;
   margin: 4px 0;
   color: var(--ink);
+}
+.help-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 0 0;
+  background: linear-gradient(transparent, var(--bg2) 30%);
 }
 
 /* --- Floating windows --- */

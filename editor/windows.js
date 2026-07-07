@@ -1,12 +1,14 @@
 // Neku Studio — floating pixel windows (Paint, Settings, About…).
 // Draggable title bars, bring-to-front, positions remembered per window id.
 
+import { getJson, setJson } from './session.js';
+
 let zTop = 3000;
 
 export class WinManager {
   constructor() {
     this.wins = new Map();
-    this.saved = JSON.parse(localStorage.getItem('neku-windows') || '{}');
+    this.saved = getJson('neku-windows', {});
   }
 
   toggle(opts) {
@@ -53,7 +55,7 @@ export class WinManager {
         bar.removeEventListener('pointermove', move);
         bar.removeEventListener('pointerup', up);
         this.saved[id] = { x: el.offsetLeft, y: el.offsetTop };
-        localStorage.setItem('neku-windows', JSON.stringify(this.saved));
+        setJson('neku-windows', this.saved);
       };
       bar.addEventListener('pointermove', move);
       bar.addEventListener('pointerup', up);

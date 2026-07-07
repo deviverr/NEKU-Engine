@@ -16,6 +16,7 @@ import { openSettings, applyCustomTheme, clearCustomTheme } from './settingsui.j
 import { openMainMenu, TEMPLATES, recordRecent } from './mainmenu.js';
 import { PluginHost } from './plugins.js';
 import { ExplorerPanel, ErrorsPanel, OutputPanel } from './panels.js';
+import { getJson, getLocal, SESSION, setJson, setLocal } from './session.js';
 
 let native = null; // desktop bridge (Neutralino) or null in the browser
 
@@ -38,6 +39,7 @@ const ed = {
   select,
   markDirty,
   refreshInspector,
+  session: SESSION,
 };
 window.__neku = ed; // debug/testing hook
 
@@ -132,7 +134,7 @@ function markDirty(pushUndo = true) {
   lastSnapshot = now;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try { localStorage.setItem('neku-project', now); } catch { /* best-effort */ }
+    try { setLocal('neku-project', now); } catch { /* best-effort */ }
     recordRecent(ed.project.name, JSON.parse(now));
     errorsPanel.check();
     explorer.refresh();
@@ -828,13 +830,13 @@ $('btnCoop').addEventListener('click', () => {
     if (confirm('Disconnect from co-op session?')) collab.disconnect();
     return;
   }
-  const url = prompt('Co-op server (run: npm run coop)', localStorage.getItem('neku-coop-url') || 'ws://localhost:8348');
+  const url = prompt('Co-op server (run: npm run coop)', getLocal('neku-coop-url', 'ws://localhost:8348'));
   if (!url) return;
-  const name = prompt('Your name', localStorage.getItem('neku-coop-name') || 'dev');
+  const name = prompt('Your name', getLocal('neku-coop-name', SESSION.clientId.replace(/^client-/, 'dev-')));
   if (!name) return;
-  localStorage.setItem('neku-coop-url', url);
-  localStorage.setItem('neku-coop-name', name);
-  collab.connect({ url, room: ed.project.name, name });
+  setLocal('neku-coop-url', url);
+  setLocal('neku-coop-name', name);
+  collab.connect({ url, room: SESSION.id + ':' + ed.project.name, name });
 });
 
 // ---------------------------------------------------------------- toolbar
@@ -845,7 +847,7 @@ $('themeSelect').addEventListener('change', () => {
   const name = $('themeSelect').value;
   clearCustomTheme();
   if (name === 'custom') {
-    const saved = JSON.parse(localStorage.getItem('neku-custom-theme') || 'null');
+    const saved = getJson('neku-custom-theme', null);
     if (saved?.vars) applyCustomTheme(saved.vars);
   } else if (plugins.themes[name]) {
     document.body.dataset.theme = 'neku-dark';
@@ -853,7 +855,7 @@ $('themeSelect').addEventListener('change', () => {
   } else {
     document.body.dataset.theme = name;
   }
-  localStorage.setItem('neku-theme', name);
+  setLocal('neku-theme', name);
 });
 
 function refreshPluginRegistry() {
@@ -1085,7 +1087,7 @@ function themeContext() {
         document.body.dataset.theme = plugins.themes[name] ? 'neku-dark' : name;
         if (plugins.themes[name]) applyCustomTheme(plugins.themes[name]);
       }
-      localStorage.setItem('neku-theme', name);
+      setLocal('neku-theme', name);
     },
     async openThemeFile() {
       const file = native ? await native.openFile('theme') : await pickWebFile('.nkt,.json');
@@ -1093,8 +1095,8 @@ function themeContext() {
       try {
         const t = JSON.parse(file.text);
         if (!t.vars) throw new Error('not a .nkt theme');
-        localStorage.setItem('neku-custom-theme', JSON.stringify(t));
-        localStorage.setItem('neku-theme', 'custom');
+        setJson('neku-custom-theme', t);
+        setLocal('neku-theme', 'custom');
         applyCustomTheme(t.vars);
         $('themeSelect').value = 'custom';
       } catch (e) {
@@ -1104,6 +1106,7 @@ function themeContext() {
     async openPluginFile() {
       return native ? await native.openFile('plugin') : await pickWebFile('.nkx,.js');
     },
+    log: (msg) => output.log(msg),
   };
 }
 
@@ -1132,7 +1135,8 @@ function showMainMenu() {
     loadSample,
     loadRecent(name) {
       try {
-        const json = JSON.parse(localStorage.getItem('neku-recent:' + name));
+        const json = getJson('neku-recent:' + name, null);
+        if (!json) throw new Error('missing recent');
         loadProjectJson(json);
         markDirty(false);
       } catch {
@@ -1162,10 +1166,19 @@ $('btnTools').addEventListener('click', () =>
   ])
 );
 
-$('btnHelp').addEventListener('click', () => { $('helpOverlay').hidden = false; });
-$('btnHelpClose').addEventListener('click', () => { $('helpOverlay').hidden = true; });
+function openHelp() {
+  $('helpOverlay').hidden = false;
+  $('btnHelpClose').focus();
+}
+function closeHelp() {
+  $('helpOverlay').hidden = true;
+  $('btnHelp').focus();
+}
+
+$('btnHelp').addEventListener('click', openHelp);
+$('helpOverlay').querySelectorAll('[data-help-close]').forEach((btn) => btn.addEventListener('click', closeHelp));
 $('helpOverlay').addEventListener('pointerdown', (e) => {
-  if (e.target === $('helpOverlay')) $('helpOverlay').hidden = true;
+  if (e.target === $('helpOverlay')) closeHelp();
 });
 
 // --------------------------------------------------------------- keyboard
@@ -1174,7 +1187,7 @@ window.addEventListener('keydown', (e) => {
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName) ||
     document.activeElement?.closest('.cm-editor');
   const mod = e.metaKey || e.ctrlKey;
-  if (e.key === 'Escape') { closePopup(); $('helpOverlay').hidden = true; }
+  if (e.key === 'Escape') { closePopup(); if (!$('helpOverlay').hidden) closeHelp(); }
   if (mod && e.key === 'Enter') { e.preventDefault(); playing ? stopPlay() : startPlay(); return; }
   if (inField || playing) return;
   if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
@@ -1216,11 +1229,11 @@ ed.refreshAssets = refreshAssets;
   plugins.loadAll();
   refreshPluginRegistry();
 
-  const themeName = localStorage.getItem('neku-theme') || 'neku-dark';
+  const themeName = getLocal('neku-theme', 'neku-dark');
   $('themeSelect').value = themeName;
   $('themeSelect').dispatchEvent(new Event('change'));
 
-  const saved = localStorage.getItem('neku-project') || localStorage.getItem('cce-project');
+  const saved = getLocal('neku-project') || getLocal('cce-project');
   let firstRun = false;
   if (saved) {
     try { loadProjectJson(JSON.parse(saved)); }

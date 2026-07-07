@@ -47,5 +47,6 @@ builds for macOS / Windows / Linux.
 - [x] G4 GitHub Release v1.0.0: desktop zips + sample game exports attached
 - [x] G5 Full browser + desktop verification pass
 - [x] G6 GitHub Pages hosted Studio + v1.0.1 rebuild with mascot decoded from the attached ASCII art
+- [x] G7 v1.0.2: non-locking cheatsheet overlay + per-client/session local settings
 
 Execution order: A → F (testers get builds even if time runs short) → B → C → D → E → G.

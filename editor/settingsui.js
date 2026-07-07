@@ -1,6 +1,8 @@
 // Neku Studio — Settings window: themes (incl. custom editor + .nkt files),
 // project metadata, extensions (.nkx), editor preferences.
 
+import { currentSessionUrl, getJson, getLocal, newSessionUrl, removeLocal, SESSION, setJson, setLocal } from './session.js';
+
 const THEME_VARS = ['--bg', '--bg2', '--bg3', '--line', '--ink', '--dim', '--accent', '--accent2', '--warn', '--err', '--ok', '--shadow', '--vpbg'];
 
 export function applyCustomTheme(vars) {
@@ -19,7 +21,7 @@ export function openSettings(winman, ed, ctx) {
     width: 440,
     content(body) {
       const meta = (ed.project.settings.meta ||= {});
-      const saved = JSON.parse(localStorage.getItem('neku-custom-theme') || 'null');
+      const saved = getJson('neku-custom-theme', null);
 
       body.innerHTML = `
         <div class="set-section">CUSTOM THEME</div>
@@ -33,7 +35,7 @@ export function openSettings(winman, ed, ctx) {
         </div>
         <div class="set-section">PROJECT METADATA</div>
         <div class="prop-row"><label>author</label><input class="set-author" type="text" value="${meta.author || ''}" /></div>
-        <div class="prop-row"><label>version</label><input class="set-version" type="text" value="${meta.version || '1.0.1'}" /></div>
+        <div class="prop-row"><label>version</label><input class="set-version" type="text" value="${meta.version || '1.0.2'}" /></div>
         <div class="prop-row"><label>description</label><input class="set-desc" type="text" value="${meta.description || ''}" /></div>
         <div class="set-help">Included as meta tags in exports. Name an asset "icon.png" for a favicon.</div>
         <div class="set-section">EXTENSIONS (.nkx)</div>
@@ -41,7 +43,15 @@ export function openSettings(winman, ed, ctx) {
         <div class="set-row"><button class="set-addplugin">＋ Load .nkx plugin…</button></div>
         <div class="set-help">Plugins are JS with full editor access — only load files you trust.</div>
         <div class="set-section">EDITOR</div>
-        <div class="prop-row"><label>grid size</label><input class="set-grid" type="number" value="${localStorage.getItem('neku-grid') || 40}" /></div>`;
+        <div class="prop-row"><label>grid size</label><input class="set-grid" type="number" value="${getLocal('neku-grid', 40)}" /></div>
+        <div class="set-section">LOCAL SESSION</div>
+        <div class="prop-row"><label>client</label><input type="text" value="${SESSION.clientId}" readonly /></div>
+        <div class="prop-row"><label>session</label><input type="text" value="${SESSION.id}" readonly /></div>
+        <div class="set-row">
+          <button class="set-newsession">New local session</button>
+          <button class="set-copysession">Copy session URL</button>
+        </div>
+        <div class="set-help">Autosave, recents, layout, plugins, theme, and co-op defaults are scoped to this local session.</div>`;
 
       // --- theme editor ---
       const grid = body.querySelector('.set-themegrid');
@@ -70,14 +80,14 @@ export function openSettings(winman, ed, ctx) {
       };
       body.querySelector('.set-apply').addEventListener('click', () => {
         const vars = readVars();
-        localStorage.setItem('neku-custom-theme', JSON.stringify({ name: 'custom', vars }));
-        localStorage.setItem('neku-theme', 'custom');
+        setJson('neku-custom-theme', { name: 'custom', vars });
+        setLocal('neku-theme', 'custom');
         applyCustomTheme(vars);
         ctx.setTheme('custom');
       });
       body.querySelector('.set-reset').addEventListener('click', () => {
         clearCustomTheme();
-        localStorage.removeItem('neku-custom-theme');
+        removeLocal('neku-custom-theme');
         ctx.setTheme('neku-dark');
       });
       body.querySelector('.set-export').addEventListener('click', () => {
@@ -119,7 +129,14 @@ export function openSettings(winman, ed, ctx) {
 
       // --- editor prefs ---
       body.querySelector('.set-grid').addEventListener('change', (e) => {
-        localStorage.setItem('neku-grid', Math.max(8, +e.target.value || 40));
+        setLocal('neku-grid', Math.max(8, +e.target.value || 40));
+      });
+      body.querySelector('.set-newsession').addEventListener('click', () => {
+        location.href = newSessionUrl();
+      });
+      body.querySelector('.set-copysession').addEventListener('click', async () => {
+        await navigator.clipboard?.writeText(currentSessionUrl());
+        ctx.log?.('Copied this Studio session URL.');
       });
     },
   });

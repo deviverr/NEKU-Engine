@@ -1,5 +1,7 @@
 // Neku Studio — main menu (welcome screen) + project templates.
 
+import { getJson, removeLocal, setJson } from './session.js';
+
 export const TEMPLATES = {
   'Blank': {
     name: 'New Game',
@@ -62,18 +64,18 @@ export const TEMPLATES = {
   },
 };
 
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 
 export function recordRecent(name, json) {
   try {
-    const list = JSON.parse(localStorage.getItem('neku-recents') || '[]').filter((r) => r.name !== name);
+    const list = getJson('neku-recents', []).filter((r) => r.name !== name);
     list.unshift({ name, ts: Date.now() });
     while (list.length > 6) {
       const dead = list.pop();
-      localStorage.removeItem('neku-recent:' + dead.name);
+      removeLocal('neku-recent:' + dead.name);
     }
-    localStorage.setItem('neku-recents', JSON.stringify(list));
-    localStorage.setItem('neku-recent:' + name, JSON.stringify(json));
+    setJson('neku-recents', list);
+    setJson('neku-recent:' + name, json);
   } catch { /* storage full — recents are best-effort */ }
 }
 
@@ -82,7 +84,7 @@ export function openMainMenu(ctx) {
   document.getElementById('mainMenu')?.remove();
   const el = document.createElement('div');
   el.id = 'mainMenu';
-  const recents = JSON.parse(localStorage.getItem('neku-recents') || '[]');
+  const recents = getJson('neku-recents', []);
   const extra = Object.keys(ctx.templates?.() || {});
 
   el.innerHTML = `
