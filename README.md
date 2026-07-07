@@ -17,8 +17,14 @@ that run everywhere — the spiritual successor of the Casino Calculator Engine.
   chromatic aberration — toggle in project settings.
 - **Physics, sprite animation, tilemaps** for 2D; **GLTF models, textures, PBR
   materials, shadows, raycast-clickable meshes** for 3D.
-- **Single-file export.** 2D games flatten to ~45 KB. 3D games embed Three.js and land
-  around 1 MB — still ~40× smaller than an empty Godot web export.
+- **Keyframe Timeline panel** — animate any numeric property with eased keyframes,
+  preview in-editor, play at runtime with `game.playAnim('name')`.
+- **Apps, not just games**: `TextInput` node (focus, caret, `onChange`/`onSubmit`),
+  buttons, labels — enough UI to build calculator-grade apps on the game canvas.
+- **Prefabs**: save any subtree as a reusable ★ prefab, instantiate from the add menu.
+- **Single-file export.** 2D games flatten to ~50 KB (Neku Breakout, a complete game,
+  is 51 KB). 3D games embed Three.js and land around 1 MB — still ~40× smaller than an
+  empty Godot web export. One click also produces an **itch.io-ready ZIP**.
 
 ## Quick start
 
@@ -85,15 +91,24 @@ no npm). Rooms hold the latest project; edits broadcast live with presence and c
 peer selections. Simultaneous edits resolve last-write-wins, so agree on who edits which
 scene/script at the same time; the project JSON in git remains your history/backup.
 
-## Export
+## Export & publishing
 
 | Target | How | Size |
 |---|---|---|
-| Web (2D game) | Export button or `node tools/export.js p.json` | ~45 KB, one file |
+| Web (2D game) | Export ▾ → HTML, or `node tools/export.js p.json` | ~50 KB, one file |
 | Web (3D game) | same — Three.js embeds via import map | ~1 MB, one file |
+| **itch.io** | Export ▾ → itch.io ZIP (or `--zip`) | same + zip header |
 | Windows/macOS/Linux | wrap the exported HTML with [Tauri](https://tauri.app) | +3–8 MB |
 | Android/iOS | [Capacitor](https://capacitorjs.com) or PWA | +1–5 MB |
 | Game Boy Advance | Not this engine (no JS on a 16 MHz ARM7). Real path: C/C++ with devkitARM/Butano. Long-term research idea only. | — |
+
+**Publish to itch.io** — Export ▾ → *itch.io ZIP* → itch.io → Upload new project →
+kind of project: **HTML** → upload the zip → check *“This file will be played in the
+browser”*. Set the viewport to your project's width×height. Done.
+
+**Publish to GitHub Pages** — commit the exported `.html` as `index.html` in a repo (or
+`docs/`), then Settings → Pages → deploy from branch. Your game is live at
+`https://you.github.io/repo/`. Tip: name an asset `icon.png` and it becomes the favicon.
 
 ## Repo layout
 
@@ -111,8 +126,9 @@ Runtime dependency count: **0**. Three.js and CodeMirror are vendored, pinned fi
 
 ## Roadmap
 
-- [ ] Keyframe timeline panel (property animation tracks)
-- [ ] Prefabs + multi-scene editing UI
+- [x] Keyframe timeline panel (property animation tracks)
+- [x] Prefabs · itch.io ZIP export · TextInput node · in-editor help
+- [ ] Multi-scene editing UI
 - [ ] Op-based co-op sync (per-property merge instead of last-write-wins)
 - [ ] Skeletal/GLTF animation playback controls
 - [ ] Custom shader nodes; more post-FX (bloom, pixelate, palette-swap)

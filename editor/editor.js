@@ -7,6 +7,8 @@ import { CodeEditor } from './codeeditor.js';
 import { Viewport2D } from './viewport2d.js';
 import { Viewport3D } from './viewport3d.js';
 import { CollabClient } from './collab.js';
+import { TimelinePanel } from './timeline.js';
+import { buildZip } from '../engine/bundler.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -52,6 +54,8 @@ function emptyProjectJson() {
     scenes: [{ name: 'Main', root: { type: 'Node', name: 'Main' } }],
     scripts: {},
     assets: {},
+    anims: {},
+    prefabs: {},
   };
 }
 
@@ -65,6 +69,8 @@ function serializeProject() {
     scenes: p.scenes.map((s) => ({ name: s.name, root: serialize(s.root) })),
     scripts: { ...p.scripts },
     assets: { ...p.assets },
+    anims: JSON.parse(JSON.stringify(p.anims || {})),
+    prefabs: JSON.parse(JSON.stringify(p.prefabs || {})),
   };
 }
 
@@ -81,6 +87,8 @@ function loadProjectJson(json, { keepSelection = false } = {}) {
     scenes: (json.scenes || []).map((s) => ({ name: s.name, root: hydrate(s.root || { type: 'Node', name: s.name }) })),
     scripts: { ...(json.scripts || {}) },
     assets: { ...(json.assets || {}) },
+    anims: JSON.parse(JSON.stringify(json.anims || {})),
+    prefabs: JSON.parse(JSON.stringify(json.prefabs || {})),
   };
   if (!ed.project.scenes.length) ed.project.scenes = [{ name: 'Main', root: hydrate({ type: 'Node', name: 'Main' }) }];
   ed.sel = selName ? ed.scene().root.find(selName) : null;
@@ -163,6 +171,10 @@ dock.addPanel({ id: 'inspector', title: 'Inspector', zone: 'right', el: panelFro
 dock.addPanel({ id: 'assets', title: 'Assets', zone: 'left', el: panelFromTemplate('tpl-assets') });
 dock.addPanel({ id: 'script', title: 'Script', zone: 'bottom', el: panelFromTemplate('tpl-script') });
 dock.addPanel({ id: 'console', title: 'Console', zone: 'bottom', el: panelFromTemplate('tpl-console') });
+const timelineEl = document.createElement('div');
+dock.addPanel({ id: 'timeline', title: 'Timeline', zone: 'bottom', el: timelineEl });
+const timeline = new TimelinePanel(timelineEl, ed);
+ed.timelinePanel = timeline;
 dock.activate('hierarchy');
 dock.activate('script');
 
@@ -232,9 +244,17 @@ function select(node) {
 }
 
 $('btnAddNode').addEventListener('click', () => {
-  const type = $('addNodeType').value;
+  const value = $('addNodeType').value;
   const parent = ed.sel || ed.scene().root;
-  const node = new GameNode(type, { name: uniqueName(type) });
+  let node;
+  if (value.startsWith('prefab:')) {
+    const def = ed.project.prefabs?.[value.slice(7)];
+    if (!def) return;
+    node = hydrate(JSON.parse(JSON.stringify(def)));
+    node.name = uniqueName(node.name.replace(/\d+$/, ''));
+  } else {
+    node = new GameNode(value, { name: uniqueName(value) });
+  }
   if (!node.is3D && !ed.sel) {
     node.x = ed.project.settings.width / 2;
     node.y = ed.project.settings.height / 2;
@@ -244,6 +264,22 @@ $('btnAddNode').addEventListener('click', () => {
   select(node);
   if (node.is3D && activeTab === '2d') setVpTab('3d');
 });
+
+function refreshAddMenu() {
+  const selEl = $('addNodeType');
+  selEl.querySelector('optgroup[label="Prefabs"]')?.remove();
+  const names = Object.keys(ed.project.prefabs || {});
+  if (!names.length) return;
+  const group = document.createElement('optgroup');
+  group.label = 'Prefabs';
+  for (const n of names) {
+    const opt = document.createElement('option');
+    opt.value = 'prefab:' + n;
+    opt.textContent = '★ ' + n;
+    group.appendChild(opt);
+  }
+  selEl.appendChild(group);
+}
 
 function uniqueName(base) {
   let i = 1;
@@ -362,6 +398,13 @@ function refreshInspector() {
   const actions = document.createElement('div');
   actions.className = 'prop-actions';
   actions.append(
+    actionBtn('★ Prefab', () => {
+      const name = prompt('Save selection as prefab:', sel.name);
+      if (!name) return;
+      (ed.project.prefabs ||= {})[name] = serialize(sel);
+      markDirty();
+      refreshAddMenu();
+    }),
     actionBtn('Duplicate', () => {
       const copy = hydrate(serialize(sel));
       copy.name = uniqueName(sel.name.replace(/\d+$/, ''));
@@ -622,6 +665,8 @@ function conLine(kind, args) {
 // -------------------------------------------------------------- play mode
 
 function startPlay() {
+  timeline.stopPreviewOnly();
+  timeline.restore(); // never bake a scrubbed pose into the running game
   setVpTab('game');
   const json = serializeProject();
   const mount = $('playMount');
@@ -723,17 +768,57 @@ $('btnNew').addEventListener('click', () => {
   markDirty(false);
 });
 
-$('btnSample').addEventListener('click', async () => {
-  const which = prompt('Load sample: 1 = Casino Calculator (2D+3D)  ·  2 = Neku Arcade (3D room + CRT screen)', '2');
-  const file = which === '1' ? 'casino-calculator' : which === '2' ? 'neku-arcade' : null;
-  if (!file) return;
+// --- popup menus ---
+
+let openPopup = null;
+function closePopup() {
+  openPopup?.remove();
+  openPopup = null;
+}
+function popupMenu(anchor, items) {
+  if (openPopup) return closePopup();
+  const menu = document.createElement('div');
+  menu.className = 'popup-menu';
+  for (const it of items) {
+    const b = document.createElement('button');
+    b.innerHTML = `<b>${it.label}</b>` + (it.desc ? `<span>${it.desc}</span>` : '');
+    b.addEventListener('click', () => {
+      closePopup();
+      it.action();
+    });
+    menu.appendChild(b);
+  }
+  const r = anchor.getBoundingClientRect();
+  menu.style.left = Math.min(r.left, innerWidth - 320) + 'px';
+  menu.style.top = r.bottom + 4 + 'px';
+  document.body.appendChild(menu);
+  openPopup = menu;
+  setTimeout(() => {
+    addEventListener('pointerdown', function close(e) {
+      if (!menu.contains(e.target)) {
+        closePopup();
+        removeEventListener('pointerdown', close, true);
+      }
+    }, true);
+  });
+}
+
+async function loadSample(file) {
   try {
     loadProjectJson(await (await fetch(`../projects/${file}.json`)).json());
     markDirty();
   } catch (e) {
     alert('Could not load sample: ' + e.message);
   }
-});
+}
+
+$('btnSample').addEventListener('click', () =>
+  popupMenu($('btnSample'), [
+    { label: '🕹 Neku Arcade', desc: '3D room · clickable CRT slot machine · post-FX', action: () => loadSample('neku-arcade') },
+    { label: '🧮 Casino Calculator', desc: '2D UI + 3D coin · the original gamble-culator', action: () => loadSample('casino-calculator') },
+    { label: '🧱 Neku Breakout', desc: 'pure 2D · physics · exports ~45 KB', action: () => loadSample('neku-breakout') },
+  ])
+);
 
 $('btnOpen').addEventListener('click', () => $('fileInput').click());
 $('fileInput').addEventListener('change', async (e) => {
@@ -762,14 +847,48 @@ $('btnSave').addEventListener('click', () => {
   download(slug(ed.project.name) + '.json', JSON.stringify(serializeProject(), null, 2));
 });
 
-$('btnExport').addEventListener('click', async () => {
-  try {
-    const html = await buildExport(serializeProject(), async (path) => await (await fetch('../' + path)).text());
-    download(slug(ed.project.name) + '.html', html, 'text/html');
-  } catch (e) {
-    alert('Export failed: ' + e.message);
-    conLine('error', ['export: ' + (e.stack || e.message)]);
-  }
+const fetchRepoFile = async (path) => await (await fetch('../' + path)).text();
+
+function downloadBytes(name, bytes, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([bytes], { type }));
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+$('btnExport').addEventListener('click', () =>
+  popupMenu($('btnExport'), [
+    {
+      label: '⬇ HTML file',
+      desc: 'one self-contained file — open anywhere, host anywhere',
+      action: async () => {
+        try {
+          download(slug(ed.project.name) + '.html', await buildExport(serializeProject(), fetchRepoFile), 'text/html');
+        } catch (e) { alert('Export failed: ' + e.message); }
+      },
+    },
+    {
+      label: '⬇ itch.io ZIP',
+      desc: 'index.html in a zip — upload straight to itch.io (HTML game)',
+      action: async () => {
+        try {
+          downloadBytes(slug(ed.project.name) + '.zip', await buildZip(serializeProject(), fetchRepoFile), 'application/zip');
+        } catch (e) { alert('Export failed: ' + e.message); }
+      },
+    },
+    {
+      label: '⬇ Project .json',
+      desc: 'the editable source — commit this to git',
+      action: () => download(slug(ed.project.name) + '.json', JSON.stringify(serializeProject(), null, 2)),
+    },
+  ])
+);
+
+$('btnHelp').addEventListener('click', () => { $('helpOverlay').hidden = false; });
+$('btnHelpClose').addEventListener('click', () => { $('helpOverlay').hidden = true; });
+$('helpOverlay').addEventListener('pointerdown', (e) => {
+  if (e.target === $('helpOverlay')) $('helpOverlay').hidden = true;
 });
 
 // --------------------------------------------------------------- keyboard
@@ -778,6 +897,7 @@ window.addEventListener('keydown', (e) => {
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName) ||
     document.activeElement?.closest('.cm-editor');
   const mod = e.metaKey || e.ctrlKey;
+  if (e.key === 'Escape') { closePopup(); $('helpOverlay').hidden = true; }
   if (mod && e.key === 'Enter') { e.preventDefault(); playing ? stopPlay() : startPlay(); return; }
   if (inField || playing) return;
   if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
@@ -804,6 +924,10 @@ function refreshAll() {
   refreshInspector();
   refreshScripts();
   refreshAssets();
+  refreshAddMenu();
+  timeline.stopPreviewOnly();
+  timeline.baseline = null; // scene was rebuilt; old snapshot is stale
+  timeline.refresh();
 }
 
 (async function boot() {
@@ -819,11 +943,12 @@ function refreshAll() {
     catch { loadProjectJson(emptyProjectJson()); }
   }
 
-  (function loop() {
+  (function loop(now) {
     if (!playing) {
+      timeline.frame(now || performance.now());
       if (activeTab === '2d') vp2d.render();
       else if (activeTab === '3d') vp3d.render();
     }
     requestAnimationFrame(loop);
-  })();
+  })(performance.now());
 })();

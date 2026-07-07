@@ -1,0 +1,126 @@
+{
+  "name": "Neku Breakout",
+  "engine": "neku-0.2",
+  "settings": {
+    "width": 480,
+    "height": 640,
+    "background": "#12152b",
+    "pixelated": true,
+    "physics": {
+      "gravity": 0
+    }
+  },
+  "mainScene": "Main",
+  "scenes": [
+    {
+      "name": "Main",
+      "root": {
+        "type": "Node",
+        "name": "Main",
+        "script": "Breakout.js",
+        "children": [
+          {
+            "type": "Rect",
+            "name": "WallL",
+            "x": -12,
+            "y": 320,
+            "w": 24,
+            "h": 1280,
+            "color": "#232842",
+            "body": "static"
+          },
+          {
+            "type": "Rect",
+            "name": "WallR",
+            "x": 492,
+            "y": 320,
+            "w": 24,
+            "h": 1280,
+            "color": "#232842",
+            "body": "static"
+          },
+          {
+            "type": "Rect",
+            "name": "WallT",
+            "x": 240,
+            "y": -12,
+            "w": 960,
+            "h": 24,
+            "color": "#232842",
+            "body": "static"
+          },
+          {
+            "type": "Rect",
+            "name": "Paddle",
+            "x": 240,
+            "y": 596,
+            "w": 92,
+            "h": 14,
+            "color": "#29e6c4",
+            "radius": 7,
+            "body": "static"
+          },
+          {
+            "type": "Circle",
+            "name": "Ball",
+            "x": 240,
+            "y": 560,
+            "radius": 8,
+            "color": "#ffd700",
+            "body": "dynamic",
+            "gravityScale": 0,
+            "bounce": 1,
+            "script": "Ball.js"
+          },
+          {
+            "type": "Label",
+            "name": "Score",
+            "x": 14,
+            "y": 24,
+            "text": "SCORE 0",
+            "size": 18,
+            "bold": true,
+            "color": "#29e6c4",
+            "align": "left",
+            "font": "monospace"
+          },
+          {
+            "type": "Label",
+            "name": "Lives",
+            "x": 466,
+            "y": 24,
+            "text": "♥♥♥",
+            "size": 18,
+            "color": "#ff5c9e",
+            "align": "right"
+          },
+          {
+            "type": "Label",
+            "name": "Msg",
+            "x": 240,
+            "y": 380,
+            "text": "CLICK TO SERVE",
+            "size": 24,
+            "bold": true,
+            "color": "#f5f0ff",
+            "font": "monospace"
+          },
+          {
+            "type": "Particles",
+            "name": "Chips",
+            "x": 0,
+            "y": 0,
+            "gravity": 500
+          }
+        ]
+      }
+    }
+  ],
+  "scripts": {
+    "Breakout.js": "// NEKU BREAKOUT — bricks are spawned from code, so restart is one call.\nconst COLORS = ['#ff5c9e', '#ffcb47', '#29e6c4', '#4ade80', '#5fa8e0'];\nlet score = 0, lives = 3, bricksLeft = 0, playing = false, over = false;\n\nfunction ready() {\n  buildBricks();\n  game.on('brick', (brick) => {\n    score += 10;\n    bricksLeft--;\n    game.find('Score').text = 'SCORE ' + score;\n    const p = game.find('Chips');\n    p.x = brick.x; p.y = brick.y;\n    p.burst(12, { colors: [brick.color], up: -60, life: 0.8, maxSpeed: 260 });\n    game.audio.play(bricksLeft % 5 === 0 ? 'coin' : 'tick');\n    if (bricksLeft <= 0) win();\n  });\n  game.on('ball-lost', () => {\n    lives--;\n    game.find('Lives').text = '♥'.repeat(Math.max(0, lives));\n    game.audio.play('lose');\n    if (lives <= 0) gameOver();\n    else { playing = false; say('CLICK TO SERVE'); resetBall(); }\n  });\n}\n\nfunction buildBricks() {\n  bricksLeft = 0;\n  for (let r = 0; r < 5; r++) {\n    for (let c = 0; c < 8; c++) {\n      game.spawn('Main', 'Rect', {\n        name: 'Brick_' + r + '_' + c,\n        x: 44 + c * 56, y: 70 + r * 26,\n        w: 48, h: 18, radius: 3,\n        color: COLORS[r], body: 'static',\n      });\n      bricksLeft++;\n    }\n  }\n}\n\nfunction say(msg) { const m = game.find('Msg'); m.text = msg; m.visible = true; }\n\nfunction resetBall() {\n  const b = game.find('Ball');\n  b.x = game.find('Paddle').x; b.y = 560; b.vx = 0; b.vy = 0;\n}\n\nfunction onInput(e) {\n  if (e.type === 'pointermove') {\n    const p = game.find('Paddle');\n    p.x = game.clamp(e.x, p.w / 2, 480 - p.w / 2);\n    if (!playing && !over) game.find('Ball').x = p.x;\n  }\n  if (e.type === 'pointerdown') {\n    if (over) { restart(); return; }\n    if (!playing) {\n      playing = true;\n      game.find('Msg').visible = false;\n      const b = game.find('Ball');\n      b.vx = game.rand(-120, 120); b.vy = -400;\n      game.audio.play('pop');\n    }\n  }\n}\n\nfunction update() {\n  const b = game.find('Ball');\n  if (playing && b.y > 640 + 30) game.emit('ball-lost');\n}\n\nfunction win() { over = true; playing = false; say('YOU WIN! CLICK TO RESTART'); game.audio.play('jackpot'); }\nfunction gameOver() { over = true; playing = false; say('GAME OVER — CLICK TO RESTART'); }\n\nfunction restart() {\n  for (let r = 0; r < 5; r++) for (let c = 0; c < 8; c++) game.find('Brick_' + r + '_' + c)?.destroy();\n  score = 0; lives = 3; over = false; playing = false;\n  game.find('Score').text = 'SCORE 0';\n  game.find('Lives').text = '♥♥♥';\n  say('CLICK TO SERVE');\n  resetBall();\n  buildBricks();\n}",
+    "Ball.js": "// Keeps speed constant and converts paddle/brick hits into gameplay.\nconst SPEED = 430;\n\nfunction update(dt) {\n  const len = Math.hypot(self.vx || 0, self.vy || 0);\n  if (len > 1) {\n    // steady arcade speed + never perfectly horizontal\n    self.vx = (self.vx / len) * SPEED;\n    self.vy = (self.vy / len) * SPEED;\n    if (Math.abs(self.vy) < 60) self.vy = (self.vy < 0 ? -1 : 1) * 60;\n  }\n}\n\nfunction onCollide(other, side) {\n  if (!other) return;\n  if (other.name === 'Paddle') {\n    // hit position controls the return angle\n    self.vx = (self.x - other.x) * 7;\n    self.vy = -Math.abs(self.vy);\n    game.audio.play('pop');\n  } else if (other.name.startsWith('Brick_')) {\n    other.destroy();\n    game.emit('brick', other);\n  } else {\n    game.audio.play('tick');\n  }\n}"
+  },
+  "assets": {},
+  "anims": {},
+  "prefabs": {}
+}

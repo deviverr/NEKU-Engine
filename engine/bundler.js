@@ -45,8 +45,94 @@ const b64 = (s) => {
   return btoa(unescape(encodeURIComponent(s)));
 };
 
+// --- Zero-dep ZIP writer (store method, enough for itch.io uploads) -------
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+// files: [{ name, text }] -> Uint8Array of a valid .zip
+export function makeZip(files) {
+  const enc = new TextEncoder();
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+
+  for (const { name, text } of files) {
+    const nameB = enc.encode(name);
+    const data = enc.encode(text);
+    const crc = crc32(data);
+    const header = new DataView(new ArrayBuffer(30));
+    header.setUint32(0, 0x04034b50, true); // local file header
+    header.setUint16(4, 20, true);         // version needed
+    header.setUint16(8, 0, true);          // method: store
+    header.setUint32(14, crc, true);
+    header.setUint32(18, data.length, true);
+    header.setUint32(22, data.length, true);
+    header.setUint16(26, nameB.length, true);
+    chunks.push(new Uint8Array(header.buffer), nameB, data);
+
+    const c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); // central directory header
+    c.setUint16(4, 20, true);
+    c.setUint16(6, 20, true);
+    c.setUint16(10, 0, true);
+    c.setUint32(16, crc, true);
+    c.setUint32(20, data.length, true);
+    c.setUint32(24, data.length, true);
+    c.setUint16(28, nameB.length, true);
+    c.setUint32(42, offset, true);
+    central.push(new Uint8Array(c.buffer), nameB);
+    offset += 30 + nameB.length + data.length;
+  }
+
+  let centralSize = 0;
+  for (const c of central) centralSize += c.length;
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); // end of central directory
+  end.setUint16(8, files.length, true);
+  end.setUint16(10, files.length, true);
+  end.setUint32(12, centralSize, true);
+  end.setUint32(16, offset, true);
+
+  const total = offset + centralSize + 22;
+  const out = new Uint8Array(total);
+  let p = 0;
+  for (const c of [...chunks, ...central, new Uint8Array(end.buffer)]) {
+    out.set(c, p);
+    p += c.length;
+  }
+  return out;
+}
+
+// itch.io-ready ZIP: the exported game as index.html inside a zip.
+export async function buildZip(project, getFile) {
+  const html = await buildExport(project, getFile);
+  return makeZip([{ name: 'index.html', text: html }]);
+}
+
 const PAGE_CSS = `html, body { margin: 0; height: 100%; background: #0b0e14; display: grid; place-items: center; overflow: hidden; }
   #game { box-shadow: 0 12px 60px rgba(0,0,0,.6); border-radius: 8px; overflow: hidden; }`;
+
+// icon.png (or first image asset named *icon*) becomes the page favicon.
+function faviconTag(project) {
+  const entry = Object.entries(project.assets || {}).find(
+    ([name, url]) => /icon/i.test(name) && url.startsWith('data:image')
+  );
+  return entry ? `<link rel="icon" href="${entry[1]}" />\n` : '';
+}
 
 const BOOT_JS = `const mount = document.getElementById('game');
 const S = PROJECT.settings || {};
@@ -58,7 +144,7 @@ function fit() {
 }
 fit();
 addEventListener('resize', fit);
-startGame(PROJECT, mount);`;
+window.game = startGame(PROJECT, mount); // console access for debugging`;
 
 // getFile(relativePathFromRepoRoot) -> Promise<string>
 export async function buildExport(project, getFile) {
@@ -74,7 +160,7 @@ export async function buildExport(project, getFile) {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
 <title>${title}</title>
-<style>${PAGE_CSS}</style>
+${faviconTag(project)}<style>${PAGE_CSS}</style>
 </head>
 <body>
 <div id="game"></div>
@@ -100,7 +186,7 @@ ${BOOT_JS}
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
 <title>${title}</title>
-<style>${PAGE_CSS}</style>
+${faviconTag(project)}<style>${PAGE_CSS}</style>
 </head>
 <body>
 <div id="game"></div>

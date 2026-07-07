@@ -6,7 +6,7 @@
 //
 // 3D (Three.js) loads dynamically only when a scene uses 3D nodes.
 
-export { startGame, Game, GameNode, hydrate, serialize, treeHas3D, NODE_TYPES } from './core.js';
+export { startGame, Game, GameNode, hydrate, serialize, treeHas3D, sampleAnim, NODE_TYPES } from './core.js';
 export { AudioEngine } from './audio.js';
 export { Input } from './input.js';
 export { render2D, drawNode, hitTest } from './renderer2d.js';

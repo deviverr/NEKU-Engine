@@ -46,6 +46,7 @@ export class Input {
       this._events.push({ type: 'pointerup', x: p.x, y: p.y });
     });
     on(window, 'keydown', (e) => {
+      this.beforeKey?.(e); // game hook: e.g. preventDefault while a TextInput has focus
       if (!this.keys.has(e.key)) this._justPressed.add(e.key);
       this.keys.add(e.key);
       this._events.push({ type: 'keydown', key: e.key });

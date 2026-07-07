@@ -143,6 +143,31 @@ const PAINTERS = {
     ctx.restore();
   },
 
+  TextInput(ctx, n) {
+    roundRect(ctx, -n.w / 2, -n.h / 2, n.w, n.h, n.radius ?? 6);
+    ctx.fillStyle = n.bg || '#10231a';
+    ctx.fill();
+    ctx.strokeStyle = n._focused ? '#ffffff' : n.border || '#29e6c4';
+    ctx.lineWidth = n._focused ? 3 : 2;
+    ctx.stroke();
+    const pad = 12;
+    const size = n.size || 18;
+    ctx.font = `${size}px ${n.font || 'ui-monospace, monospace'}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const showPlaceholder = !n.text && !n._focused;
+    ctx.fillStyle = showPlaceholder ? 'rgba(160,170,180,0.55)' : n.color || '#fff';
+    let text = showPlaceholder ? n.placeholder ?? '' : n.text ?? '';
+    // Clip overflowing text from the left so the caret stays visible.
+    while (text.length && ctx.measureText(text).width > n.w - pad * 2) text = text.slice(1);
+    ctx.fillText(text, -n.w / 2 + pad, 1);
+    if (n._focused && Math.floor(Date.now() / 500) % 2 === 0) {
+      const cx = -n.w / 2 + pad + ctx.measureText(text).width + 2;
+      ctx.fillStyle = n.color || '#fff';
+      ctx.fillRect(cx, -size / 2, 2, size);
+    }
+  },
+
   Particles(ctx, n) {
     if (!n._particles) return;
     for (const p of n._particles) {

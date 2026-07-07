@@ -32,6 +32,10 @@ export const NODE_TYPES = {
   Button: { x: 0, y: 0, w: 120, h: 48, text: 'Button', color: '#2d6a4f', textColor: '#ffffff', textSize: 20, radius: 10, opacity: 1 },
   Particles: { x: 0, y: 0, color: '#ffd700', gravity: 600, opacity: 1 },
   Tilemap: { x: 0, y: 0, tileset: '', tileW: 32, tileH: 32, cols: 10, rows: 8, tiles: [], collision: false, opacity: 1 },
+  TextInput: {
+    x: 0, y: 0, w: 220, h: 42, text: '', placeholder: 'type here…', size: 18,
+    color: '#ffffff', bg: '#10231a', border: '#29e6c4', radius: 6, maxLength: 64, opacity: 1,
+  },
   // --- 3D ---
   Node3D: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 },
   Camera3D: { x: 0, y: 2, z: 6, tx: 0, ty: 0, tz: 0, fov: 55, near: 0.1, far: 500 },
@@ -133,6 +137,29 @@ export function treeHas3D(node) {
   return (node.children || []).some(treeHas3D);
 }
 
+// Evaluate an animation clip at time t, writing values onto nodes.
+// def: { duration, loop, tracks: [{ node, prop, keys: [{ t, v, ease }] }] }
+// findNode: name -> node (or null). Shared by the runtime and the editor.
+export function sampleAnim(def, t, findNode) {
+  for (const track of def.tracks || []) {
+    const node = findNode(track.node);
+    const keys = track.keys;
+    if (!node || !keys?.length) continue;
+    let value;
+    if (t <= keys[0].t) value = keys[0].v;
+    else if (t >= keys[keys.length - 1].t) value = keys[keys.length - 1].v;
+    else {
+      let i = 0;
+      while (i < keys.length - 1 && keys[i + 1].t < t) i++;
+      const a = keys[i], b = keys[i + 1];
+      const span = b.t - a.t || 1e-6;
+      const k = (Easing[b.ease] || Easing.linear)((t - a.t) / span);
+      value = a.v + (b.v - a.v) * k;
+    }
+    node[track.prop] = value;
+  }
+}
+
 function compileScript(name, src) {
   const body = `"use strict";
 ${src}
@@ -143,6 +170,8 @@ ${src}
   onInput: typeof onInput === 'function' ? onInput : null,
   onSignal: typeof onSignal === 'function' ? onSignal : null,
   onCollide: typeof onCollide === 'function' ? onCollide : null,
+  onChange: typeof onChange === 'function' ? onChange : null,
+  onSubmit: typeof onSubmit === 'function' ? onSubmit : null,
 };`;
   try {
     return new Function('self', 'game', body);
@@ -166,10 +195,13 @@ export class Game {
     this.time = 0;
     this.audio = new AudioEngine();
     this.physics = new Physics2D(s.physics || {});
+    this.anims = project.anims || {};
+    this._activeAnims = [];
     this._tweens = [];
     this._timers = [];
     this._signals = new Map();
     this._running = false;
+    this._focusInput = null; // focused TextInput node
     this.gl3d = null; // set async when the scene uses 3D
 
     container.innerHTML = '';
@@ -202,6 +234,9 @@ export class Game {
     // Input listens on the topmost visible canvas.
     this.inputSurface = this.fxCanvas || this.canvas2d;
     this.input = new Input(this.inputSurface, this.width, this.height);
+    this.input.beforeKey = (e) => {
+      if (this._focusInput && ['Backspace', ' ', 'Tab', 'ArrowUp', 'ArrowDown'].includes(e.key)) e.preventDefault();
+    };
 
     // Assets: data URLs. Images get an <img> for the 2D renderer; every
     // asset keeps its URL for Three loaders (textures, GLTF) and audio.
@@ -328,6 +363,21 @@ export class Game {
     this._signals.get(name).push(fn);
   }
 
+  // Keyframe animation clips (authored in the Studio's Timeline panel).
+  playAnim(name, { loop = null, onDone = null } = {}) {
+    const def = this.anims[name];
+    if (!def) {
+      console.warn(`[neku] unknown animation: "${name}"`);
+      return;
+    }
+    this.stopAnim(name);
+    this._activeAnims.push({ name, def, t: 0, loop: loop ?? !!def.loop, onDone });
+  }
+
+  stopAnim(name) {
+    this._activeAnims = this._activeAnims.filter((a) => a.name !== name);
+  }
+
   rand = rand;
   randInt = randInt;
   pick = pick;
@@ -368,12 +418,29 @@ export class Game {
       if (e.type === 'pointerdown' || e.type === 'pointermove' || e.type === 'pointerup') {
         this._pointer(e);
       }
+      if (e.type === 'keydown' && this._focusInput) this._typeInto(this._focusInput, e.key);
       const walk = (n) => {
         if (n._hooks?.onInput) this._safely(() => n._hooks.onInput(e));
         for (const c of n.children) walk(c);
       };
       walk(this.root);
     }
+
+    // Keyframe animations (before scripts so update() sees final values).
+    for (const a of this._activeAnims) {
+      a.t += dt;
+      const dur = a.def.duration || 1;
+      if (a.t >= dur) {
+        if (a.loop) a.t %= dur;
+        else {
+          a.t = dur;
+          a.done = true;
+        }
+      }
+      sampleAnim(a.def, a.t, (name) => this.find(name));
+      if (a.done && a.onDone) this._safely(a.onDone);
+    }
+    this._activeAnims = this._activeAnims.filter((a) => !a.done);
 
     for (const t of this._timers) {
       if (t.dead) continue;
@@ -446,14 +513,42 @@ export class Game {
     if (this.uiMode !== 'screen3d') this._pointer2D(e);
   }
 
+  _typeInto(node, key) {
+    const prev = node.text;
+    if (key === 'Backspace') node.text = node.text.slice(0, -1);
+    else if (key === 'Enter') {
+      if (node._hooks?.onSubmit) this._safely(() => node._hooks.onSubmit());
+      this.emit('submit', { name: node.name, text: node.text });
+      return;
+    } else if (key === 'Escape') {
+      this._focusInput._focused = false;
+      this._focusInput = null;
+      return;
+    } else if (key.length === 1 && node.text.length < (node.maxLength ?? 64)) {
+      node.text += key;
+    } else return;
+    if (node.text !== prev) {
+      if (node._hooks?.onChange) this._safely(() => node._hooks.onChange());
+      this.emit('change', { name: node.name, text: node.text });
+    }
+  }
+
   _pointer2D(e) {
     let target = null;
+    let inputTarget = null;
     const walk = (n) => {
       if (n.visible === false) return;
       if (n.type === 'Button' && (n.opacity ?? 1) > 0 && hitTest(n, e.x, e.y)) target = n;
+      if (n.type === 'TextInput' && (n.opacity ?? 1) > 0 && hitTest(n, e.x, e.y)) inputTarget = n;
       for (const c of n.children) walk(c);
     };
     walk(this.root);
+
+    if (e.type === 'pointerdown') {
+      if (this._focusInput && this._focusInput !== inputTarget) this._focusInput._focused = false;
+      this._focusInput = inputTarget;
+      if (inputTarget) inputTarget._focused = true;
+    }
 
     const clearHover = (n) => {
       if (n.type === 'Button') n._hover = false;

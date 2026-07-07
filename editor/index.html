@@ -27,8 +27,43 @@
       <option value="famicom">▞ Famicom</option>
       <option value="paper">▚ Paper</option>
     </select>
+    <button id="btnHelp" title="API cheatsheet & shortcuts">?</button>
     <button id="btnPlay" class="accent" title="Run the game (Ctrl/Cmd+Enter)">▶ PLAY</button>
   </header>
+
+  <div id="helpOverlay" hidden>
+    <div id="helpBox">
+      <div class="panel-tools"><b>NEKU CHEATSHEET</b><span class="flex"></span><button id="btnHelpClose">✕</button></div>
+      <div id="helpContent" class="fill-scroll">
+        <h4>Script hooks</h4>
+        <pre>function ready() {}              // node entered the scene
+function update(dt) {}           // every frame
+function onPress() {}            // Button / Mesh3D clicked
+function onInput(e) {}           // raw pointer + keyboard
+function onSignal(name, data) {} // game.emit from anywhere
+function onCollide(other, side)  // physics contact
+function onChange() / onSubmit() // TextInput</pre>
+        <h4>game API</h4>
+        <pre>game.find(name)   game.spawn(parent, type, props)   node.destroy()
+game.tween(node, {x:100}, {duration:.4, easing:'backOut'})
+game.after(s, fn)   game.every(s, fn)   game.time
+game.emit(name, data)   game.on(name, fn)
+game.playAnim('name', {onDone})   game.stopAnim('name')
+game.audio.play('coin')  // click tick pop coin win lose jackpot spin whoosh
+game.audio.tone({freq, type, duration, slide})
+game.input.isDown('ArrowLeft')   game.input.pointer
+game.rand(a,b) randInt pick clamp lerp   game.gotoScene(name)
+particles.burst(30, {colors:['#ffd700'], up:-80})</pre>
+        <h4>Physics (2D)</h4>
+        <pre>body: 'dynamic' | 'static' | 'area' · vx vy · gravityScale · bounce
+dynamic nodes collide with statics + tilemaps (collision: true)</pre>
+        <h4>Shortcuts</h4>
+        <pre>Cmd/Ctrl+Enter play · Cmd/Ctrl+Z undo · Shift+drag snap
+arrows nudge · Del delete · double-click rename
+Timeline: scrub, edit node, ◆ Key · double-click row = key that track</pre>
+      </div>
+    </div>
+  </div>
   <div id="dockRoot"></div>
 </div>
 
@@ -38,8 +73,8 @@
     <select id="addNodeType" title="Node type to add">
       <optgroup label="2D">
         <option>Node</option><option>Rect</option><option>Circle</option>
-        <option>Label</option><option>Button</option><option>Sprite</option>
-        <option>Particles</option><option>Tilemap</option>
+        <option>Label</option><option>Button</option><option>TextInput</option>
+        <option>Sprite</option><option>Particles</option><option>Tilemap</option>
       </optgroup>
       <optgroup label="3D">
         <option>Node3D</option><option>Mesh3D</option><option>Camera3D</option>
