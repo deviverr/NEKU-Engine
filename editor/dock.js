@@ -67,6 +67,17 @@ export class Dock {
     zone.querySelector('.zone-body').dispatchEvent(new CustomEvent('panel-shown', { detail: id, bubbles: true }));
   }
 
+  // Layout presets: { panelId: zoneName }, optional sizes { left, right, bottom } px.
+  applyPreset(map, sizes = {}) {
+    for (const [id, zone] of Object.entries(map)) this.movePanel(id, zone);
+    const vars = { left: '--zw-left', right: '--zw-right', bottom: '--zh-bottom' };
+    for (const [k, v] of Object.entries(sizes)) this.root.style.setProperty(vars[k], v + 'px');
+    for (const z of ['left', 'right', 'bottom']) {
+      const first = [...this.panels.values()].find((p) => p.zone === z);
+      if (first) this.activate(first.id);
+    }
+  }
+
   movePanel(id, zoneName) {
     const panel = this.panels.get(id);
     if (!panel || panel.zone === zoneName || !this.zones[zoneName]) return;

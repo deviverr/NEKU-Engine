@@ -17,12 +17,30 @@ function projectUses3D(project) {
   return (project.scenes || []).some((s) => has3D(s.root || {}));
 }
 
+function projectUsesPhysics3D(project) {
+  const has = (n) => n.body3d === 'dynamic' || n.body3d === 'static' || (n.children || []).some(has);
+  return (project.scenes || []).some((s) => has(s.root || {}));
+}
+
 // Rewrite relative import specifiers to bare names for the import map.
 function toBareImports(src) {
   return src
     .replace(/from\s+['"]\.\.\/vendor\/three\.js['"]/g, "from 'three'")
+    .replace(/from\s+['"]\.\.\/vendor\/cannon\.js['"]/g, "from 'cannon'")
     .replace(/import\(\s*['"]\.\/render3d\.js['"]\s*\)/g, "import('neku/render3d')")
+    .replace(/import\(\s*['"]\.\/physics3d\.js['"]\s*\)/g, "import('neku/physics3d')")
     .replace(/from\s+['"]\.\/([a-z0-9]+)\.js['"]/g, "from 'neku/$1'");
+}
+
+// Metadata (Settings → Project metadata) becomes standard meta tags.
+function metaTags(project) {
+  const m = project.settings?.meta || {};
+  const esc = (s) => String(s).replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  let tags = '<meta name="generator" content="Neku Engine" />\n';
+  if (m.author) tags += `<meta name="author" content="${esc(m.author)}" />\n`;
+  if (m.description) tags += `<meta name="description" content="${esc(m.description)}" />\n`;
+  if (m.version) tags += `<meta name="app-version" content="${esc(m.version)}" />\n`;
+  return tags;
 }
 
 function flatten2D(files) {
@@ -160,7 +178,7 @@ export async function buildExport(project, getFile) {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
 <title>${title}</title>
-${faviconTag(project)}<style>${PAGE_CSS}</style>
+${metaTags(project)}${faviconTag(project)}<style>${PAGE_CSS}</style>
 </head>
 <body>
 <div id="game"></div>
@@ -176,7 +194,12 @@ ${BOOT_JS}
 
   // 3D: import map with data: URLs (single file, real modules, Three included).
   const imports = { three: `data:text/javascript;base64,${b64(await getFile('vendor/three.js'))}` };
-  for (const f of ENGINE_3D_FILES) {
+  const files3d = [...ENGINE_3D_FILES];
+  if (projectUsesPhysics3D(project)) {
+    imports.cannon = `data:text/javascript;base64,${b64(await getFile('vendor/cannon.js'))}`;
+    files3d.push('physics3d.js');
+  }
+  for (const f of files3d) {
     const bare = 'neku/' + f.replace('.js', '');
     imports[bare] = `data:text/javascript;base64,${b64(toBareImports(await getFile('engine/' + f)))}`;
   }
@@ -186,7 +209,7 @@ ${BOOT_JS}
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
 <title>${title}</title>
-${faviconTag(project)}<style>${PAGE_CSS}</style>
+${metaTags(project)}${faviconTag(project)}<style>${PAGE_CSS}</style>
 </head>
 <body>
 <div id="game"></div>

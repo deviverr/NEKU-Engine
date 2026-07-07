@@ -10,6 +10,12 @@ import { CollabClient } from './collab.js';
 import { TimelinePanel } from './timeline.js';
 import { buildZip } from '../engine/bundler.js';
 import { initNative } from './native.js';
+import { WinManager } from './windows.js';
+import { openPaint } from './paint.js';
+import { openSettings, applyCustomTheme, clearCustomTheme } from './settingsui.js';
+import { openMainMenu, TEMPLATES, recordRecent } from './mainmenu.js';
+import { PluginHost } from './plugins.js';
+import { ExplorerPanel, ErrorsPanel, OutputPanel } from './panels.js';
 
 let native = null; // desktop bridge (Neutralino) or null in the browser
 
@@ -20,15 +26,24 @@ const $ = (id) => document.getElementById(id);
 const ed = {
   project: null,
   sel: null,
+  currentScene: null, // scene being edited (mainScene is the boot scene)
   peers: new Map(), // id -> { name, color, selName }
   paint: { active: false, tile: 0 },
   assets: { images: {}, urls: {} },
-  scene() { return ed.project.scenes.find((s) => s.name === ed.project.mainScene) || ed.project.scenes[0]; },
+  scene() {
+    return ed.project.scenes.find((s) => s.name === ed.currentScene) ||
+      ed.project.scenes.find((s) => s.name === ed.project.mainScene) ||
+      ed.project.scenes[0];
+  },
   select,
   markDirty,
   refreshInspector,
 };
 window.__neku = ed; // debug/testing hook
+
+const winman = new WinManager();
+const plugins = new PluginHost(ed);
+ed.log = (msg) => conLine('log', [msg]);
 
 let currentScript = null;
 let playing = null;
@@ -42,6 +57,7 @@ const ENUM_FIELDS = {
   kind: ['directional', 'ambient', 'point', 'hemi'],
   align: ['left', 'center', 'right'],
   body: ['', 'dynamic', 'static', 'area'],
+  body3d: ['', 'dynamic', 'static'],
   sound: ['click', 'tick', 'pop', 'coin', 'win', 'lose', 'jackpot', 'spin', 'whoosh'],
 };
 const IMAGE_FIELDS = new Set(['asset', 'texture', 'tileset']);
@@ -94,6 +110,7 @@ function loadProjectJson(json, { keepSelection = false } = {}) {
     prefabs: JSON.parse(JSON.stringify(json.prefabs || {})),
   };
   if (!ed.project.scenes.length) ed.project.scenes = [{ name: 'Main', root: hydrate({ type: 'Node', name: 'Main' }) }];
+  ed.currentScene = ed.project.scenes.some((s) => s.name === ed.currentScene) ? ed.currentScene : ed.project.mainScene;
   ed.sel = selName ? ed.scene().root.find(selName) : null;
   if (!Object.keys(ed.project.scripts).includes(currentScript)) currentScript = Object.keys(ed.project.scripts)[0] || null;
   $('projectName').value = ed.project.name;
@@ -116,6 +133,9 @@ function markDirty(pushUndo = true) {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try { localStorage.setItem('neku-project', now); } catch { /* best-effort */ }
+    recordRecent(ed.project.name, JSON.parse(now));
+    errorsPanel.check();
+    explorer.refresh();
   }, 400);
   collab.sendDoc(() => JSON.parse(now));
 }
@@ -179,6 +199,29 @@ const timelineEl = document.createElement('div');
 dock.addPanel({ id: 'timeline', title: 'Timeline', zone: 'bottom', el: timelineEl });
 const timeline = new TimelinePanel(timelineEl, ed);
 ed.timelinePanel = timeline;
+
+const explorerEl = document.createElement('div');
+dock.addPanel({ id: 'explorer', title: 'Explorer', zone: 'left', el: explorerEl });
+const explorer = new ExplorerPanel(explorerEl, ed, {
+  openScript: (n) => { openScript(n); refreshScripts(); dock.activate('script'); },
+  showPanel: (id) => dock.activate(id),
+  selectAnim: (n) => { timeline.current = n; timeline.refresh(); dock.activate('timeline'); },
+  refreshAll: () => refreshAll(),
+  addScript: () => addScript(),
+  hydrate,
+});
+
+const errorsEl = document.createElement('div');
+dock.addPanel({ id: 'errors', title: 'Errors', zone: 'bottom', el: errorsEl });
+const errorsPanel = new ErrorsPanel(errorsEl, ed, {
+  openScript: (n) => { openScript(n); refreshScripts(); dock.activate('script'); },
+});
+
+const outputEl = document.createElement('div');
+dock.addPanel({ id: 'output', title: 'Output', zone: 'bottom', el: outputEl });
+const output = new OutputPanel(outputEl);
+ed.log = (msg) => output.log(msg);
+
 dock.activate('hierarchy');
 dock.activate('script');
 
@@ -664,6 +707,9 @@ function conLine(kind, args) {
   pane.appendChild(div);
   while (pane.children.length > 500) pane.firstChild.remove();
   pane.scrollTop = 1e9;
+  if (kind === 'error') {
+    try { errorsPanel.pushRuntime(div.textContent); } catch { /* panel not ready yet */ }
+  }
 }
 
 // -------------------------------------------------------------- play mode
@@ -687,17 +733,51 @@ function startPlay() {
     playing = new Game(json, stage);
     playing.start();
     window.__nekuGame = playing;
+    plugins.emit('play', { game: playing });
   } catch (e) {
     conLine('error', ['game crashed on boot: ' + (e.stack || e.message)]);
   }
+
+  // Debug bar: fps / node count / watches + pause·step controls.
+  const bar = document.createElement('div');
+  bar.id = 'debugBar';
+  bar.innerHTML = `<button id="dbgPause" title="Pause/resume game loop">⏸</button>
+    <button id="dbgStep" title="Step one frame">⏭</button>
+    <span id="dbgStats"></span><span id="dbgWatch"></span>`;
+  mount.appendChild(bar);
+  bar.querySelector('#dbgPause').addEventListener('click', () => {
+    if (!playing) return;
+    playing._paused ? playing.resume() : playing.pause();
+    bar.querySelector('#dbgPause').textContent = playing._paused ? '▶' : '⏸';
+  });
+  bar.querySelector('#dbgStep').addEventListener('click', () => {
+    if (!playing) return;
+    playing._paused || playing.pause();
+    bar.querySelector('#dbgPause').textContent = '▶';
+    playing.stepOnce();
+  });
+  debugTimer = setInterval(() => {
+    if (!playing) return;
+    let nodes = 0;
+    (function count(n) { nodes++; n.children.forEach(count); })(playing.root);
+    bar.querySelector('#dbgStats').textContent = ` ${playing.fps || '–'} fps · ${nodes} nodes · t=${playing.time.toFixed(1)}s`;
+    const w = playing._watches;
+    bar.querySelector('#dbgWatch').textContent = w?.size
+      ? ' · ' + [...w].map(([k, v]) => `${k}=${typeof v === 'number' ? +v.toFixed(2) : v}`).join(' · ')
+      : '';
+  }, 250);
+
   $('btnPlay').textContent = '■ STOP';
   $('btnPlay').classList.add('playing');
 }
+let debugTimer = 0;
 
 function stopPlay() {
   if (!playing) return;
   try { playing.stop(); } catch { /* already dead */ }
   playing = null;
+  clearInterval(debugTimer);
+  plugins.emit('stop', {});
   $('playMount').innerHTML = '';
   $('btnPlay').textContent = '▶ PLAY';
   $('btnPlay').classList.remove('playing');
@@ -762,9 +842,36 @@ $('btnCoop').addEventListener('click', () => {
 $('projectName').addEventListener('change', () => { ed.project.name = $('projectName').value; markDirty(); });
 
 $('themeSelect').addEventListener('change', () => {
-  document.body.dataset.theme = $('themeSelect').value;
-  localStorage.setItem('neku-theme', $('themeSelect').value);
+  const name = $('themeSelect').value;
+  clearCustomTheme();
+  if (name === 'custom') {
+    const saved = JSON.parse(localStorage.getItem('neku-custom-theme') || 'null');
+    if (saved?.vars) applyCustomTheme(saved.vars);
+  } else if (plugins.themes[name]) {
+    document.body.dataset.theme = 'neku-dark';
+    applyCustomTheme(plugins.themes[name]);
+  } else {
+    document.body.dataset.theme = name;
+  }
+  localStorage.setItem('neku-theme', name);
 });
+
+function refreshPluginRegistry() {
+  // plugin themes appear in the theme dropdown under a group
+  $('themeSelect').querySelector('optgroup[label="Plugins"]')?.remove();
+  const names = Object.keys(plugins.themes);
+  if (names.length) {
+    const g = document.createElement('optgroup');
+    g.label = 'Plugins';
+    for (const n of names) {
+      const o = document.createElement('option');
+      o.value = o.textContent = n;
+      g.appendChild(o);
+    }
+    $('themeSelect').appendChild(g);
+  }
+}
+plugins.onRegistry = refreshPluginRegistry;
 
 $('btnNew').addEventListener('click', () => {
   if (!confirm('Start a new empty project? (current work stays in browser autosave until then)')) return;
@@ -871,7 +978,7 @@ function download(name, text, type = 'application/json') {
 const slug = (s) => (s || 'game').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'game';
 
 $('btnSave').addEventListener('click', () => {
-  download(slug(ed.project.name) + '.json', JSON.stringify(serializeProject(), null, 2));
+  download(slug(ed.project.name) + '.neku', JSON.stringify(serializeProject(), null, 2));
 });
 
 const fetchRepoFile = async (path) => await (await fetch('../' + path)).text();
@@ -894,25 +1001,164 @@ $('btnExport').addEventListener('click', () =>
       label: '⬇ HTML file',
       desc: 'one self-contained file — open anywhere, host anywhere',
       action: async () => {
+        const t0 = performance.now();
         try {
-          download(slug(ed.project.name) + '.html', await buildExport(serializeProject(), fetchRepoFile), 'text/html');
-        } catch (e) { alert('Export failed: ' + e.message); }
+          const html = await buildExport(serializeProject(), fetchRepoFile);
+          download(slug(ed.project.name) + '.html', html, 'text/html');
+          output.log(`export HTML: ${slug(ed.project.name)}.html — ${(html.length / 1024).toFixed(1)} KB in ${Math.round(performance.now() - t0)} ms`);
+          plugins.emit('export', { kind: 'html' });
+          dock.activate('output');
+        } catch (e) {
+          alert('Export failed: ' + e.message);
+          output.log('export FAILED: ' + e.message);
+        }
       },
     },
     {
       label: '⬇ itch.io ZIP',
       desc: 'index.html in a zip — upload straight to itch.io (HTML game)',
       action: async () => {
+        const t0 = performance.now();
         try {
-          downloadBytes(slug(ed.project.name) + '.zip', await buildZip(serializeProject(), fetchRepoFile), 'application/zip');
-        } catch (e) { alert('Export failed: ' + e.message); }
+          const bytes = await buildZip(serializeProject(), fetchRepoFile);
+          downloadBytes(slug(ed.project.name) + '.zip', bytes, 'application/zip');
+          output.log(`export itch.io ZIP: ${slug(ed.project.name)}.zip — ${(bytes.length / 1024).toFixed(1)} KB in ${Math.round(performance.now() - t0)} ms`);
+          plugins.emit('export', { kind: 'zip' });
+          dock.activate('output');
+        } catch (e) {
+          alert('Export failed: ' + e.message);
+          output.log('export FAILED: ' + e.message);
+        }
       },
     },
     {
-      label: '⬇ Project .json',
+      label: '⬇ Project .neku',
       desc: 'the editable source — commit this to git',
-      action: () => download(slug(ed.project.name) + '.json', JSON.stringify(serializeProject(), null, 2)),
+      action: () => download(slug(ed.project.name) + '.neku', JSON.stringify(serializeProject(), null, 2)),
     },
+    {
+      label: '⬇ Prefab .nkp',
+      desc: 'selected node subtree as a shareable prefab file',
+      action: () => {
+        if (!ed.sel) return alert('Select a node first.');
+        download(slug(ed.sel.name) + '.nkp', JSON.stringify({ neku: 'prefab', name: ed.sel.name, node: serialize(ed.sel) }, null, 2));
+      },
+    },
+    {
+      label: '⬆ Import prefab .nkp',
+      desc: 'add a prefab file to this project',
+      action: async () => {
+        const file = native ? await native.openFile('prefab') : await pickWebFile('.nkp,.json');
+        if (!file) return;
+        try {
+          const p = JSON.parse(file.text);
+          if (p.neku !== 'prefab') throw new Error('not a .nkp prefab');
+          (ed.project.prefabs ||= {})[p.name] = p.node;
+          markDirty();
+          refreshAddMenu();
+          explorer.refresh();
+          output.log(`imported prefab "${p.name}"`);
+        } catch (e) { alert('Import failed: ' + e.message); }
+      },
+    },
+  ])
+);
+
+// --- Tools menu, main menu, settings, paint, layouts ---
+
+const LAYOUTS = {
+  'Default': [{ hierarchy: 'left', assets: 'left', inspector: 'right', script: 'bottom', console: 'bottom', timeline: 'bottom' }, { left: 230, right: 270, bottom: 240 }],
+  'Code': [{ hierarchy: 'left', assets: 'left', inspector: 'left', script: 'right', console: 'bottom', timeline: 'bottom' }, { left: 220, right: 480, bottom: 160 }],
+  'Animation': [{ hierarchy: 'left', assets: 'left', inspector: 'right', timeline: 'bottom', script: 'bottom', console: 'bottom' }, { left: 200, right: 260, bottom: 300 }],
+  'Art': [{ assets: 'right', hierarchy: 'left', inspector: 'right', script: 'bottom', console: 'bottom', timeline: 'bottom' }, { left: 200, right: 320, bottom: 180 }],
+};
+
+function themeContext() {
+  return {
+    plugins,
+    native,
+    download,
+    setTheme(name) {
+      $('themeSelect').value = name;
+      if (name !== 'custom') {
+        clearCustomTheme();
+        document.body.dataset.theme = plugins.themes[name] ? 'neku-dark' : name;
+        if (plugins.themes[name]) applyCustomTheme(plugins.themes[name]);
+      }
+      localStorage.setItem('neku-theme', name);
+    },
+    async openThemeFile() {
+      const file = native ? await native.openFile('theme') : await pickWebFile('.nkt,.json');
+      if (!file) return;
+      try {
+        const t = JSON.parse(file.text);
+        if (!t.vars) throw new Error('not a .nkt theme');
+        localStorage.setItem('neku-custom-theme', JSON.stringify(t));
+        localStorage.setItem('neku-theme', 'custom');
+        applyCustomTheme(t.vars);
+        $('themeSelect').value = 'custom';
+      } catch (e) {
+        alert('Could not load theme: ' + e.message);
+      }
+    },
+    async openPluginFile() {
+      return native ? await native.openFile('plugin') : await pickWebFile('.nkx,.js');
+    },
+  };
+}
+
+// Browser fallback file picker returning { name, text }.
+function pickWebFile(accept) {
+  return new Promise((resolve) => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = accept;
+    inp.onchange = async () => {
+      const f = inp.files[0];
+      resolve(f ? { name: f.name, text: await f.text() } : null);
+    };
+    inp.click();
+  });
+}
+
+function showMainMenu() {
+  openMainMenu({
+    templates: () => plugins.templates,
+    newFromTemplate(json) {
+      loadProjectJson(json);
+      markDirty(false);
+    },
+    openFile: () => $('btnOpen').click(),
+    loadSample,
+    loadRecent(name) {
+      try {
+        const json = JSON.parse(localStorage.getItem('neku-recent:' + name));
+        loadProjectJson(json);
+        markDirty(false);
+      } catch {
+        alert('Could not load recent project.');
+      }
+    },
+  });
+}
+
+$('logo').addEventListener('click', showMainMenu);
+
+$('btnTools').addEventListener('click', () =>
+  popupMenu($('btnTools'), [
+    { label: '🎨 Paint', desc: 'pixel sprite editor → saves to assets', action: () => openPaint(winman, ed) },
+    { label: '⚙ Settings', desc: 'custom theme · metadata · extensions', action: () => openSettings(winman, ed, themeContext()) },
+    { label: '🏠 Main menu', desc: 'templates · samples · recent projects', action: showMainMenu },
+    ...Object.entries(LAYOUTS).map(([name, [map, sizes]]) => ({
+      label: '▤ Layout: ' + name,
+      desc: '',
+      action: () => dock.applyPreset(map, sizes),
+    })),
+    ...plugins.tools.map((t) => ({
+      label: '⚡ ' + t.label,
+      desc: 'from ' + t.plugin + '.nkx',
+      action: () => t.fn(ed),
+    })),
   ])
 );
 
@@ -959,21 +1205,32 @@ function refreshAll() {
   timeline.stopPreviewOnly();
   timeline.baseline = null; // scene was rebuilt; old snapshot is stale
   timeline.refresh();
+  explorer.refresh();
+  errorsPanel.check();
+  plugins.emit('projectLoaded', { name: ed.project?.name });
 }
+ed.refreshAssets = refreshAssets;
 
 (async function boot() {
   native = await initNative().catch(() => null);
-  document.body.dataset.theme = localStorage.getItem('neku-theme') || 'neku-dark';
-  $('themeSelect').value = document.body.dataset.theme;
+  plugins.loadAll();
+  refreshPluginRegistry();
+
+  const themeName = localStorage.getItem('neku-theme') || 'neku-dark';
+  $('themeSelect').value = themeName;
+  $('themeSelect').dispatchEvent(new Event('change'));
 
   const saved = localStorage.getItem('neku-project') || localStorage.getItem('cce-project');
+  let firstRun = false;
   if (saved) {
     try { loadProjectJson(JSON.parse(saved)); }
     catch { loadProjectJson(emptyProjectJson()); }
   } else {
+    firstRun = true;
     try { loadProjectJson(await (await fetch('../projects/neku-arcade.json')).json()); }
     catch { loadProjectJson(emptyProjectJson()); }
   }
+  if (firstRun) showMainMenu();
 
   (function loop(now) {
     if (!playing) {

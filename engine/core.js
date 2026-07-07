@@ -45,6 +45,7 @@ export const NODE_TYPES = {
     shape: 'box', w: 1, h: 1, d: 1, radius: 0.5, model: '',
     color: '#cccccc', texture: '', metalness: 0.1, roughness: 0.75,
     emissive: '', emissiveIntensity: 1, opacity: 1, unlit: false, wireframe: false,
+    body3d: '', mass: 1, friction: 0.3, restitution: 0.2,
   },
   Screen3D: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1, w: 2, h: 1.5, glow: 0.9 },
 };
@@ -135,6 +136,11 @@ export function serialize(node) {
 export function treeHas3D(node) {
   if (node.is3D || IS_3D.has(node.type)) return true;
   return (node.children || []).some(treeHas3D);
+}
+
+export function treeHasPhysics3D(node) {
+  if (node.body3d === 'dynamic' || node.body3d === 'static') return true;
+  return (node.children || []).some(treeHasPhysics3D);
 }
 
 // Evaluate an animation clip at time t, writing values onto nodes.
@@ -270,6 +276,17 @@ export class Game {
     }
   }
 
+  async _ensurePhysics3D() {
+    if (this.physics3d || this._loadingP3d) return;
+    this._loadingP3d = true;
+    try {
+      const { Physics3D } = await import('./physics3d.js');
+      this.physics3d = new Physics3D(this.project.settings?.physics || {});
+    } catch (e) {
+      console.error('[neku] 3D physics failed to load: ' + e.message);
+    }
+  }
+
   gotoScene(name) {
     const def = (this.project.scenes || []).find((sc) => sc.name === name);
     if (!def) {
@@ -279,6 +296,7 @@ export class Game {
     this.sceneName = name;
     this.root = hydrate(def.root);
     if (treeHas3D(this.root)) this._ensure3D();
+    if (treeHasPhysics3D(this.root)) this._ensurePhysics3D();
     this._tweens = [];
     this._timers = [];
     this._pendingReady = [];
@@ -323,6 +341,7 @@ export class Game {
     const node = new GameNode(type, props);
     p.addChild(node);
     if (node.is3D) this._ensure3D();
+    if (node.body3d === 'dynamic' || node.body3d === 'static') this._ensurePhysics3D();
     if (props.script) {
       this._pendingReady = null;
       this._bindScripts(node);
@@ -363,6 +382,16 @@ export class Game {
     this._signals.get(name).push(fn);
   }
 
+  // --- Debugging ---
+
+  watch(name, value) {
+    (this._watches ||= new Map()).set(name, value);
+  }
+
+  pause() { this._paused = true; }
+  resume() { this._paused = false; }
+  stepOnce() { this._step = true; }
+
   // Keyframe animation clips (authored in the Studio's Timeline panel).
   playAnim(name, { loop = null, onDone = null } = {}) {
     const def = this.anims[name];
@@ -393,9 +422,13 @@ export class Game {
       if (!this._running) return;
       const dt = Math.min((now - last) / 1000, 0.05);
       last = now;
-      this.time += dt;
+      this.fps = Math.round((this.fps || 60) * 0.9 + (1 / Math.max(dt, 1e-4)) * 0.1);
       try {
-        this._update(dt);
+        if (!this._paused || this._step) {
+          this._step = false;
+          this.time += dt;
+          this._update(dt);
+        }
         this._render();
       } catch (e) {
         console.error('[neku] frame error: ' + (e.stack || e.message));
@@ -470,6 +503,12 @@ export class Game {
       if (a._hooks?.onCollide) this._safely(() => a._hooks.onCollide(b, side));
       if (b?._hooks?.onCollide) this._safely(() => b._hooks.onCollide(a, side === 'overlap' ? 'overlap' : opposite(side)));
     });
+    if (this.physics3d) {
+      this.physics3d.step(this.root, dt, (a, b, side) => {
+        if (a._hooks?.onCollide) this._safely(() => a._hooks.onCollide(b, side));
+        if (b?._hooks?.onCollide) this._safely(() => b._hooks.onCollide(a, side));
+      });
+    }
 
     // Scripts, sprite animation, particles.
     const walk = (n) => {

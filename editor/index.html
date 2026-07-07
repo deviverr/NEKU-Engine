@@ -22,11 +22,16 @@
     <button id="btnCoop" title="Team Create — edit together live">◉ Co-op</button>
     <span id="peers"></span>
     <span class="flex"></span>
+    <button id="btnTools" title="Paint, Settings, Layouts…">🛠 Tools ▾</button>
     <select id="themeSelect" title="Editor theme">
       <option value="neku-dark">▞ Neku Dark</option>
+      <option value="cwat">▞ Cwat</option>
       <option value="crt-green">▚ CRT Green</option>
       <option value="famicom">▞ Famicom</option>
+      <option value="synthwave">▞ Synthwave</option>
+      <option value="gameboy">▚ Gameboy</option>
       <option value="paper">▚ Paper</option>
+      <option value="custom">★ Custom</option>
     </select>
     <button id="btnHelp" title="API cheatsheet & shortcuts">?</button>
     <button id="btnPlay" class="accent" title="Run the game (Ctrl/Cmd+Enter)">▶ PLAY</button>
@@ -55,9 +60,18 @@ game.audio.tone({freq, type, duration, slide})
 game.input.isDown('ArrowLeft')   game.input.pointer
 game.rand(a,b) randInt pick clamp lerp   game.gotoScene(name)
 particles.burst(30, {colors:['#ffd700'], up:-80})</pre>
-        <h4>Physics (2D)</h4>
+        <h4>Physics 2D</h4>
         <pre>body: 'dynamic' | 'static' | 'area' · vx vy · gravityScale · bounce
 dynamic nodes collide with statics + tilemaps (collision: true)</pre>
+        <h4>Physics 3D (Mesh3D)</h4>
+        <pre>body3d: 'dynamic' | 'static' · mass · friction · restitution
+game.physics3d.impulse(node, x, y, z)
+game.physics3d.setVelocity(node, x, y, z) · .velocity(node)
+settings.physics.gravity3d (default -9.82)</pre>
+        <h4>Debugging</h4>
+        <pre>game.watch('hp', hp)  // shows in the play debug bar
+pause ⏸ / step ⏭ buttons while playing · Errors panel lists
+syntax errors live · Output panel logs exports</pre>
         <h4>Shortcuts</h4>
         <pre>Cmd/Ctrl+Enter play · Cmd/Ctrl+Z undo · Shift+drag snap
 arrows nudge · Del delete · double-click rename
@@ -114,7 +128,7 @@ Timeline: scrub, edit node, ◆ Key · double-click row = key that track</pre>
   <div id="consolePane" class="fill-scroll"></div>
 </template>
 
-<input type="file" id="fileInput" accept=".json" hidden />
+<input type="file" id="fileInput" accept=".neku,.nk,.json" hidden />
 <input type="file" id="assetInput" accept="image/*,audio/*,.glb,.gltf" multiple hidden />
 <script type="module" src="editor.js"></script>
 </body>
