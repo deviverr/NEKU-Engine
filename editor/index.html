@@ -3,73 +3,83 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>CCE Editor — Casino Calculator Engine</title>
+<title>Neku Studio</title>
 <link rel="stylesheet" href="style.css" />
 </head>
-<body>
+<body data-theme="neku-dark">
 <div id="app">
   <header id="toolbar">
-    <span id="logo">🎰 CCE</span>
+    <span id="logo">▞▚ NEKU</span>
     <input id="projectName" title="Project name" spellcheck="false" />
     <span class="sep"></span>
-    <button id="btnNew" title="New empty project">New</button>
-    <button id="btnOpen" title="Open a .json project from disk">Open</button>
-    <button id="btnSample" title="Load the Casino Calculator sample">Sample</button>
-    <button id="btnSave" title="Save project as .json">Save</button>
-    <button id="btnExport" title="Export a single playable .html file">Export HTML</button>
+    <button id="btnNew">New</button>
+    <button id="btnOpen">Open</button>
+    <button id="btnSample">Samples ▾</button>
+    <button id="btnSave">Save</button>
+    <button id="btnExport">Export</button>
+    <span class="sep"></span>
+    <button id="btnCoop" title="Team Create — edit together live">◉ Co-op</button>
+    <span id="peers"></span>
     <span class="flex"></span>
-    <button id="btnPlay" class="accent" title="Run the game (Ctrl/Cmd+Enter)">▶ Play</button>
+    <select id="themeSelect" title="Editor theme">
+      <option value="neku-dark">▞ Neku Dark</option>
+      <option value="crt-green">▚ CRT Green</option>
+      <option value="famicom">▞ Famicom</option>
+      <option value="paper">▚ Paper</option>
+    </select>
+    <button id="btnPlay" class="accent" title="Run the game (Ctrl/Cmd+Enter)">▶ PLAY</button>
   </header>
-
-  <aside id="hierarchy">
-    <div class="panel-title">
-      Scene
-      <span class="flex"></span>
-      <select id="addNodeType" title="Node type to add">
-        <optgroup label="2D">
-          <option>Node</option><option>Rect</option><option>Circle</option>
-          <option>Label</option><option>Button</option><option>Sprite</option><option>Particles</option>
-        </optgroup>
-        <optgroup label="3D">
-          <option>Camera3D</option><option>Light3D</option><option>Mesh3D</option>
-        </optgroup>
-      </select>
-      <button id="btnAddNode" title="Add as child of selection">＋</button>
-    </div>
-    <div id="tree"></div>
-    <div class="panel-title">
-      Scripts
-      <span class="flex"></span>
-      <button id="btnAddScript" title="New script">＋</button>
-    </div>
-    <div id="scriptList"></div>
-  </aside>
-
-  <main id="center">
-    <div id="viewportWrap">
-      <div id="viewport"></div>
-      <canvas id="overlay"></canvas>
-      <div id="playMount" hidden></div>
-      <div id="vpHint">drag: move node · empty drag: pan · wheel: zoom · del: delete</div>
-    </div>
-    <section id="bottom">
-      <div class="panel-title">
-        <button class="tab active" data-tab="code">Script</button>
-        <button class="tab" data-tab="console">Console <span id="conCount"></span></button>
-        <span class="flex"></span>
-        <span id="codeFile"></span>
-      </div>
-      <div id="codePane"></div>
-      <div id="consolePane" hidden></div>
-    </section>
-  </main>
-
-  <aside id="inspector">
-    <div class="panel-title">Inspector</div>
-    <div id="props"></div>
-  </aside>
+  <div id="dockRoot"></div>
 </div>
+
+<!-- panel templates; dock.js adopts these -->
+<template id="tpl-hierarchy">
+  <div class="panel-tools">
+    <select id="addNodeType" title="Node type to add">
+      <optgroup label="2D">
+        <option>Node</option><option>Rect</option><option>Circle</option>
+        <option>Label</option><option>Button</option><option>Sprite</option>
+        <option>Particles</option><option>Tilemap</option>
+      </optgroup>
+      <optgroup label="3D">
+        <option>Node3D</option><option>Mesh3D</option><option>Camera3D</option>
+        <option>Light3D</option><option>Screen3D</option>
+      </optgroup>
+    </select>
+    <button id="btnAddNode" title="Add as child of selection">＋</button>
+  </div>
+  <div id="tree" class="fill-scroll"></div>
+</template>
+
+<template id="tpl-inspector">
+  <div id="props" class="fill-scroll"></div>
+</template>
+
+<template id="tpl-assets">
+  <div class="panel-tools">
+    <button id="btnImportAsset">⬆ Import</button>
+    <span class="dim-note">or drop files</span>
+  </div>
+  <div id="assetGrid" class="fill-scroll"></div>
+</template>
+
+<template id="tpl-script">
+  <div class="panel-tools">
+    <select id="scriptSelect"></select>
+    <button id="btnAddScript" title="New script">＋</button>
+    <button id="btnDelScript" title="Delete script">✕</button>
+    <span class="flex"></span>
+    <span class="dim-note">self = node · game = engine</span>
+  </div>
+  <div id="codePane"></div>
+</template>
+
+<template id="tpl-console">
+  <div id="consolePane" class="fill-scroll"></div>
+</template>
+
 <input type="file" id="fileInput" accept=".json" hidden />
+<input type="file" id="assetInput" accept="image/*,audio/*,.glb,.gltf" multiple hidden />
 <script type="module" src="editor.js"></script>
 </body>
 </html>

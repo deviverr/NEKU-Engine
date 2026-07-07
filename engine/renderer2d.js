@@ -78,7 +78,7 @@ const PAINTERS = {
 
   Sprite(ctx, n, assets) {
     const img = assets.images[n.asset];
-    if (!img) {
+    if (!img || !img.naturalWidth) {
       // Missing texture: draw a checker placeholder instead of crashing.
       const w = n.w || 32, h = n.h || 32;
       ctx.fillStyle = '#f0f';
@@ -89,8 +89,38 @@ const PAINTERS = {
       ctx.fillRect(-w / 2, 0, w / 2, h / 2);
       return;
     }
+    const cols = n.sheetCols || 1, rows = n.sheetRows || 1;
+    if (cols > 1 || rows > 1) {
+      // Sprite-sheet frame (animated via `frame`/`fps`/`playing` props).
+      const fw = img.naturalWidth / cols, fh = img.naturalHeight / rows;
+      const f = Math.floor(n.frame || 0) % (cols * rows);
+      const w = n.w || fw, h = n.h || fh;
+      ctx.drawImage(img, (f % cols) * fw, Math.floor(f / cols) * fh, fw, fh, -w / 2, -h / 2, w, h);
+      return;
+    }
     const w = n.w || img.naturalWidth, h = n.h || img.naturalHeight;
     ctx.drawImage(img, -w / 2, -h / 2, w, h);
+  },
+
+  Tilemap(ctx, n, assets) {
+    const img = assets.images[n.tileset];
+    const tw = n.tileW || 32, th = n.tileH || 32;
+    const cols = n.cols || 0, rows = n.rows || 0;
+    const ox = -(cols * tw) / 2, oy = -(rows * th) / 2;
+    const setCols = img && img.naturalWidth ? Math.max(1, Math.floor(img.naturalWidth / tw)) : 1;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const t = n.tiles?.[r * cols + c] ?? -1;
+        if (t < 0) continue;
+        if (img && img.naturalWidth) {
+          ctx.drawImage(img, (t % setCols) * tw, Math.floor(t / setCols) * th, tw, th, ox + c * tw, oy + r * th, tw, th);
+        } else {
+          // No tileset image: render solid tiles so layout is still visible.
+          ctx.fillStyle = ['#5b8c5a', '#7a6a53', '#4a6d8c', '#8c5a5b'][t % 4];
+          ctx.fillRect(ox + c * tw, oy + r * th, tw, th);
+        }
+      }
+    }
   },
 
   Button(ctx, n) {

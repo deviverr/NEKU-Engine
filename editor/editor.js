@@ -1,29 +1,53 @@
-// CCE Editor — scene editing, scripting, play-in-editor, export.
+// Neku Studio — main editor: state, panels, viewports, play mode, co-op.
 
 import { Game, GameNode, hydrate, serialize, NODE_TYPES } from '../engine/core.js';
-import { drawNode } from '../engine/renderer2d.js';
-import { Renderer3D } from '../engine/renderer3d.js';
-import { bundleEngine, buildExportHtml } from '../engine/bundler.js';
+import { buildExport } from '../engine/bundler.js';
+import { Dock } from './dock.js';
 import { CodeEditor } from './codeeditor.js';
+import { Viewport2D } from './viewport2d.js';
+import { Viewport3D } from './viewport3d.js';
+import { CollabClient } from './collab.js';
 
 const $ = (id) => document.getElementById(id);
 
-// ---------------------------------------------------------------- state
+// ------------------------------------------------------------------ state
 
-let project = null;          // { name, settings, mainScene, scenes:[{name, root:GameNode}], scripts, assets }
-let sel = null;              // selected GameNode
-let currentScript = null;    // open script name
-let playing = null;          // running Game instance or null
-let cam = { x: 40, y: 40, zoom: 1 };
+const ed = {
+  project: null,
+  sel: null,
+  peers: new Map(), // id -> { name, color, selName }
+  paint: { active: false, tile: 0 },
+  assets: { images: {}, urls: {} },
+  scene() { return ed.project.scenes.find((s) => s.name === ed.project.mainScene) || ed.project.scenes[0]; },
+  select,
+  markDirty,
+  refreshInspector,
+};
+window.__neku = ed; // debug/testing hook
+
+let currentScript = null;
+let playing = null;
+let activeTab = '2d';
 const undoStack = [], redoStack = [];
+let lastSnapshot = null;
 
-const COLOR_KEYS = new Set(['color', 'textColor', 'strokeColor', 'hoverColor', 'pressColor', 'shadow', 'background']);
+const COLOR_KEYS = new Set(['color', 'textColor', 'strokeColor', 'hoverColor', 'pressColor', 'shadow', 'background', 'emissive', 'groundColor']);
+const ENUM_FIELDS = {
+  shape: ['box', 'sphere', 'plane', 'cylinder', 'cone', 'torus', 'model'],
+  kind: ['directional', 'ambient', 'point', 'hemi'],
+  align: ['left', 'center', 'right'],
+  body: ['', 'dynamic', 'static', 'area'],
+  sound: ['click', 'tick', 'pop', 'coin', 'win', 'lose', 'jackpot', 'spin', 'whoosh'],
+};
+const IMAGE_FIELDS = new Set(['asset', 'texture', 'tileset']);
+const MODEL_FIELDS = new Set(['model']);
+const HIDDEN_FIELDS = new Set(['tiles']);
 
 function emptyProjectJson() {
   return {
     name: 'New Game',
-    engine: 'cce-0.1',
-    settings: { width: 480, height: 720, background: '#1b2735' },
+    engine: 'neku-0.2',
+    settings: { width: 480, height: 720, background: '#1b2735', pixelated: false, uiMode: 'overlay' },
     mainScene: 'Main',
     scenes: [{ name: 'Main', root: { type: 'Node', name: 'Main' } }],
     scripts: {},
@@ -32,42 +56,43 @@ function emptyProjectJson() {
 }
 
 function serializeProject() {
+  const p = ed.project;
   return {
-    name: project.name,
-    engine: 'cce-0.1',
-    settings: { ...project.settings },
-    mainScene: project.mainScene,
-    scenes: project.scenes.map((s) => ({ name: s.name, root: serialize(s.root) })),
-    scripts: { ...project.scripts },
-    assets: { ...project.assets },
+    name: p.name,
+    engine: 'neku-0.2',
+    settings: { ...p.settings },
+    mainScene: p.mainScene,
+    scenes: p.scenes.map((s) => ({ name: s.name, root: serialize(s.root) })),
+    scripts: { ...p.scripts },
+    assets: { ...p.assets },
   };
 }
 
-function loadProjectJson(json) {
+function loadProjectJson(json, { keepSelection = false } = {}) {
   stopPlay();
-  project = {
+  const selName = keepSelection && ed.sel ? ed.sel.name : null;
+  ed.project = {
     name: json.name || 'Untitled',
-    settings: { width: 480, height: 720, background: '#1b2735', ...(json.settings || {}) },
+    settings: {
+      width: 480, height: 720, background: '#1b2735', pixelated: false, uiMode: 'overlay',
+      ...(json.settings || {}),
+    },
     mainScene: json.mainScene || json.scenes?.[0]?.name || 'Main',
     scenes: (json.scenes || []).map((s) => ({ name: s.name, root: hydrate(s.root || { type: 'Node', name: s.name }) })),
     scripts: { ...(json.scripts || {}) },
     assets: { ...(json.assets || {}) },
   };
-  if (!project.scenes.length) project.scenes = [{ name: 'Main', root: hydrate({ type: 'Node', name: 'Main' }) }];
-  sel = null;
-  currentScript = Object.keys(project.scripts)[0] || null;
-  $('projectName').value = project.name;
+  if (!ed.project.scenes.length) ed.project.scenes = [{ name: 'Main', root: hydrate({ type: 'Node', name: 'Main' }) }];
+  ed.sel = selName ? ed.scene().root.find(selName) : null;
+  if (!Object.keys(ed.project.scripts).includes(currentScript)) currentScript = Object.keys(ed.project.scripts)[0] || null;
+  $('projectName').value = ed.project.name;
   lastSnapshot = JSON.stringify(serializeProject());
   refreshAll();
 }
 
-const scene = () => project.scenes.find((s) => s.name === project.mainScene) || project.scenes[0];
-
 // ------------------------------------------------------------- persistence
 
 let saveTimer = 0;
-let lastSnapshot = null; // project state before the mutation being recorded
-
 function markDirty(pushUndo = true) {
   const now = JSON.stringify(serializeProject());
   if (pushUndo && lastSnapshot && lastSnapshot !== now) {
@@ -78,245 +103,107 @@ function markDirty(pushUndo = true) {
   lastSnapshot = now;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try {
-      localStorage.setItem('cce-project', now);
-    } catch { /* storage full — autosave is best-effort */ }
+    try { localStorage.setItem('neku-project', now); } catch { /* best-effort */ }
   }, 400);
+  collab.sendDoc(() => JSON.parse(now));
 }
 
 function undo() {
   if (!undoStack.length) return;
   redoStack.push(JSON.stringify(serializeProject()));
-  loadProjectJson(JSON.parse(undoStack.pop()));
+  loadProjectJson(JSON.parse(undoStack.pop()), { keepSelection: true });
   markDirty(false);
 }
 
 function redo() {
   if (!redoStack.length) return;
   undoStack.push(JSON.stringify(serializeProject()));
-  loadProjectJson(JSON.parse(redoStack.pop()));
+  loadProjectJson(JSON.parse(redoStack.pop()), { keepSelection: true });
   markDirty(false);
 }
 
-// ---------------------------------------------------------------- viewport
-
-const vpWrap = $('viewportWrap');
-const viewport = $('viewport');
-const overlay = $('overlay');
-const octx = overlay.getContext('2d');
-
-// 2D content canvas fills the wrapper; GL canvas is game-sized and CSS-transformed.
-const c2d = document.createElement('canvas');
-const ctx2d = c2d.getContext('2d');
-viewport.appendChild(c2d);
-const glCanvas = document.createElement('canvas');
-viewport.appendChild(glCanvas);
-viewport.insertBefore(glCanvas, c2d); // GL below 2D
-let gl3d = null;
-
-const editAssets = { images: {} };
 function rebuildAssets() {
-  editAssets.images = {};
-  for (const [name, url] of Object.entries(project.assets)) {
-    const img = new Image();
-    img.src = url;
-    editAssets.images[name] = img;
-  }
-}
-
-function resizeViewport() {
-  const r = vpWrap.getBoundingClientRect();
-  const dpr = Math.min(devicePixelRatio || 1, 2);
-  for (const c of [c2d, overlay]) {
-    c.width = r.width * dpr;
-    c.height = r.height * dpr;
-    c.style.width = r.width + 'px';
-    c.style.height = r.height + 'px';
-  }
-}
-new ResizeObserver(resizeViewport).observe(vpWrap);
-
-function renderEditView() {
-  if (!project || playing) return;
-  const dpr = Math.min(devicePixelRatio || 1, 2);
-  const { width: W, height: H, background } = project.settings;
-  const root = scene().root;
-
-  // 3D layer: game-sized GL canvas aligned with the 2D camera via CSS.
-  const has3D = (function find3d(n) { return n.is3D || n.children.some(find3d); })(root);
-  glCanvas.hidden = !has3D;
-  if (has3D) {
-    if (glCanvas.width !== W * dpr) { glCanvas.width = W * dpr; glCanvas.height = H * dpr; gl3d = null; }
-    glCanvas.style.width = W + 'px';
-    glCanvas.style.height = H + 'px';
-    glCanvas.style.transformOrigin = '0 0';
-    glCanvas.style.transform = `translate(${cam.x}px, ${cam.y}px) scale(${cam.zoom})`;
-    glCanvas.style.background = background; // scene bg lives behind the GL layer
-    gl3d ||= new Renderer3D(glCanvas);
-    gl3d.render(root, W, H);
-  }
-
-  // 2D layer.
-  ctx2d.setTransform(1, 0, 0, 1, 0, 0);
-  ctx2d.clearRect(0, 0, c2d.width, c2d.height);
-  ctx2d.setTransform(dpr * cam.zoom, 0, 0, dpr * cam.zoom, dpr * cam.x, dpr * cam.y);
-  if (!has3D) {
-    ctx2d.fillStyle = background;
-    ctx2d.fillRect(0, 0, W, H);
-  }
-  drawNode(ctx2d, root, editAssets, 1);
-
-  // Overlay: frame, grid, selection.
-  octx.setTransform(1, 0, 0, 1, 0, 0);
-  octx.clearRect(0, 0, overlay.width, overlay.height);
-  octx.setTransform(dpr * cam.zoom, 0, 0, dpr * cam.zoom, dpr * cam.x, dpr * cam.y);
-  octx.strokeStyle = 'rgba(255,255,255,0.06)';
-  octx.lineWidth = 1 / cam.zoom;
-  for (let x = 0; x <= W; x += 40) line(octx, x, 0, x, H);
-  for (let y = 0; y <= H; y += 40) line(octx, 0, y, W, y);
-  octx.strokeStyle = '#e2b714';
-  octx.strokeRect(0, 0, W, H);
-  octx.fillStyle = '#e2b714';
-  octx.font = `${12 / cam.zoom}px system-ui`;
-  octx.fillText(`${W}×${H}`, 4 / cam.zoom, -6 / cam.zoom);
-
-  if (sel && !sel._dead) {
-    const wp = worldPos(sel);
-    const b = nodeBounds(sel);
-    octx.strokeStyle = '#5fa8e0';
-    octx.lineWidth = 1.5 / cam.zoom;
-    octx.strokeRect(wp.x - (b.w / 2) * wp.sx, wp.y - (b.h / 2) * wp.sy, b.w * wp.sx, b.h * wp.sy);
-    octx.fillStyle = '#5fa8e0';
-    octx.fillText(sel.name, wp.x - (b.w / 2) * wp.sx, wp.y - (b.h / 2) * wp.sy - 6 / cam.zoom);
-  }
-  requestAnimationFrame(renderEditView);
-}
-
-function line(c, x1, y1, x2, y2) {
-  c.beginPath();
-  c.moveTo(x1, y1);
-  c.lineTo(x2, y2);
-  c.stroke();
-}
-
-// Approximate accumulated world position/scale (ignores ancestor rotation —
-// good enough for editor gizmos).
-function worldPos(node) {
-  let x = 0, y = 0, sx = 1, sy = 1;
-  const chain = [];
-  for (let n = node; n; n = n.parent) chain.push(n);
-  for (let i = chain.length - 1; i >= 0; i--) {
-    const n = chain[i];
-    x += (n.x || 0) * sx;
-    y += (n.y || 0) * sy;
-    sx *= n.scaleX ?? 1;
-    sy *= n.scaleY ?? 1;
-  }
-  return { x, y, sx, sy };
-}
-
-function nodeBounds(n) {
-  switch (n.type) {
-    case 'Rect': case 'Button': case 'Sprite':
-      return { w: n.w || 40, h: n.h || 40 };
-    case 'Circle':
-      return { w: n.radius * 2, h: n.radius * 2 };
-    case 'Label': {
-      ctx2d.font = `${n.bold ? 'bold ' : ''}${n.size || 16}px ${n.font || 'system-ui'}`;
-      return { w: Math.max(20, ctx2d.measureText(n.text ?? '').width), h: (n.size || 16) * 1.3 };
+  ed.assets = { images: {}, urls: {} };
+  for (const [name, url] of Object.entries(ed.project.assets)) {
+    ed.assets.urls[name] = url;
+    if (url.startsWith('data:image') || /\.(png|jpe?g|webp|gif)$/i.test(name)) {
+      const img = new Image();
+      img.src = url;
+      ed.assets.images[name] = img;
     }
-    default:
-      return { w: 30, h: 30 };
   }
 }
 
-function screenToGame(e) {
-  const r = vpWrap.getBoundingClientRect();
-  return { x: (e.clientX - r.left - cam.x) / cam.zoom, y: (e.clientY - r.top - cam.y) / cam.zoom };
+// ------------------------------------------------------------------- dock
+
+const dock = new Dock($('dockRoot'));
+
+function panelFromTemplate(tplId) {
+  const el = document.createElement('div');
+  el.appendChild(document.getElementById(tplId).content.cloneNode(true));
+  return el;
 }
 
-function pickNode(gx, gy) {
-  let hit = null;
-  const walk = (n) => {
-    if (n.visible === false) return;
-    if (!n.is3D && n.parent) {
-      const wp = worldPos(n);
-      const b = nodeBounds(n);
-      if (Math.abs(gx - wp.x) <= (b.w / 2) * Math.abs(wp.sx) + 2 && Math.abs(gy - wp.y) <= (b.h / 2) * Math.abs(wp.sy) + 2) hit = n;
-    }
-    for (const c of n.children) walk(c);
-  };
-  walk(scene().root);
-  return hit;
+const center = dock.center();
+center.innerHTML = `
+  <div id="vpTabs">
+    <div class="zone-tab active" data-vp="2d">2D</div>
+    <div class="zone-tab" data-vp="3d">3D</div>
+    <div class="zone-tab" data-vp="game">GAME</div>
+  </div>
+  <div id="vpBody">
+    <div class="vp-pane active" data-vp="2d"></div>
+    <div class="vp-pane" data-vp="3d"></div>
+    <div class="vp-pane" data-vp="game"><div id="playMount"></div></div>
+    <div id="vpHint">drag: move · empty drag: pan/orbit · wheel: zoom · shift: snap · del: delete</div>
+  </div>`;
+
+dock.addPanel({ id: 'hierarchy', title: 'Scene', zone: 'left', el: panelFromTemplate('tpl-hierarchy') });
+dock.addPanel({ id: 'inspector', title: 'Inspector', zone: 'right', el: panelFromTemplate('tpl-inspector') });
+dock.addPanel({ id: 'assets', title: 'Assets', zone: 'left', el: panelFromTemplate('tpl-assets') });
+dock.addPanel({ id: 'script', title: 'Script', zone: 'bottom', el: panelFromTemplate('tpl-script') });
+dock.addPanel({ id: 'console', title: 'Console', zone: 'bottom', el: panelFromTemplate('tpl-console') });
+dock.activate('hierarchy');
+dock.activate('script');
+
+for (const tab of center.querySelectorAll('#vpTabs .zone-tab')) {
+  tab.addEventListener('click', () => setVpTab(tab.dataset.vp));
 }
 
-// Viewport mouse: select/drag nodes, pan empty space, wheel zoom.
-let drag = null;
-overlay.style.pointerEvents = 'auto';
-overlay.addEventListener('pointerdown', (e) => {
-  if (playing) return;
-  overlay.setPointerCapture(e.pointerId);
-  const g = screenToGame(e);
-  const hit = pickNode(g.x, g.y);
-  if (hit) {
-    select(hit);
-    drag = { node: hit, startX: hit.x || 0, startY: hit.y || 0, gx: g.x, gy: g.y, moved: false };
-  } else {
-    select(null);
-    drag = { pan: true, sx: e.clientX, sy: e.clientY, cx: cam.x, cy: cam.y };
-  }
-});
-overlay.addEventListener('pointermove', (e) => {
-  if (!drag) return;
-  if (drag.pan) {
-    cam.x = drag.cx + (e.clientX - drag.sx);
-    cam.y = drag.cy + (e.clientY - drag.sy);
-  } else {
-    const g = screenToGame(e);
-    const wp = drag.node.parent ? worldPos(drag.node.parent) : { sx: 1, sy: 1 };
-    let nx = drag.startX + (g.x - drag.gx) / (wp.sx || 1);
-    let ny = drag.startY + (g.y - drag.gy) / (wp.sy || 1);
-    if (e.shiftKey) { nx = Math.round(nx / 10) * 10; ny = Math.round(ny / 10) * 10; }
-    drag.node.x = Math.round(nx);
-    drag.node.y = Math.round(ny);
-    drag.moved = true;
-    refreshInspector();
-  }
-});
-overlay.addEventListener('pointerup', () => {
-  if (drag && !drag.pan && drag.moved) markDirty();
-  drag = null;
-});
-overlay.addEventListener('wheel', (e) => {
-  e.preventDefault();
-  const r = vpWrap.getBoundingClientRect();
-  const mx = e.clientX - r.left, my = e.clientY - r.top;
-  const z0 = cam.zoom;
-  cam.zoom = Math.min(4, Math.max(0.15, cam.zoom * Math.exp(-e.deltaY * 0.0012)));
-  cam.x = mx - ((mx - cam.x) / z0) * cam.zoom;
-  cam.y = my - ((my - cam.y) / z0) * cam.zoom;
-}, { passive: false });
+function setVpTab(name) {
+  activeTab = name;
+  for (const t of center.querySelectorAll('#vpTabs .zone-tab')) t.classList.toggle('active', t.dataset.vp === name);
+  for (const p of center.querySelectorAll('.vp-pane')) p.classList.toggle('active', p.dataset.vp === name);
+  if (name !== 'game' && playing) stopPlay();
+}
 
-// ---------------------------------------------------------------- hierarchy
+const vp2d = new Viewport2D(center.querySelector('.vp-pane[data-vp="2d"]'), ed);
+const vp3d = new Viewport3D(center.querySelector('.vp-pane[data-vp="3d"]'), ed);
+
+// -------------------------------------------------------------- hierarchy
 
 const ICONS = {
-  Node: '▢', Rect: '▭', Circle: '◯', Label: 'Ａ', Button: '⏺', Sprite: '🖼',
-  Particles: '✨', Camera3D: '🎥', Light3D: '💡', Mesh3D: '🧊',
+  Node: '▢', Rect: '▭', Circle: '◯', Label: 'Ａ', Button: '⏺', Sprite: '🖼', Particles: '✨', Tilemap: '▦',
+  Node3D: '⬚', Camera3D: '🎥', Light3D: '💡', Mesh3D: '🧊', Screen3D: '🖵',
 };
 
 function refreshTree() {
   const tree = $('tree');
   tree.innerHTML = '';
+  const peerByNode = new Map();
+  for (const p of ed.peers.values()) if (p.selName) peerByNode.set(p.selName, p.color);
   const addRow = (node, depth) => {
     const row = document.createElement('div');
-    row.className = 'tree-row' + (node === sel ? ' selected' : '');
-    row.style.paddingLeft = 8 + depth * 14 + 'px';
+    row.className = 'tree-row' + (node === ed.sel ? ' selected' : '');
+    row.style.paddingLeft = 8 + depth * 13 + 'px';
+    const peerColor = peerByNode.get(node.name);
     row.innerHTML =
+      (peerColor ? `<span class="peer-mark" style="background:${peerColor}"></span>` : '') +
       `<span>${ICONS[node.type] || '▢'}</span><span>${node.name}</span>` +
       `<span class="type">${node.type}</span>` +
       (node.is3D ? '<span class="badge3d">3D</span>' : '') +
       (node.script ? '<span class="badge-script">𝒇</span>' : '') +
-      `<button class="hide-btn" title="toggle visibility">${node.visible === false ? '🚫' : '👁'}</button>`;
+      `<button class="hide-btn">${node.visible === false ? '🚫' : '👁'}</button>`;
     row.addEventListener('click', (e) => {
       if (e.target.classList.contains('hide-btn')) {
         node.visible = node.visible === false ? true : false;
@@ -333,53 +220,75 @@ function refreshTree() {
     tree.appendChild(row);
     for (const c of node.children) addRow(c, depth + 1);
   };
-  addRow(scene().root, 0);
+  addRow(ed.scene().root, 0);
 }
 
 function select(node) {
-  sel = node;
+  ed.sel = node;
+  ed.paint.active = false;
+  collab.sendPresence(node?.name || null);
   refreshTree();
   refreshInspector();
 }
 
 $('btnAddNode').addEventListener('click', () => {
   const type = $('addNodeType').value;
-  const parent = sel || scene().root;
-  const s = project.settings;
+  const parent = ed.sel || ed.scene().root;
   const node = new GameNode(type, { name: uniqueName(type) });
-  if (!node.is3D && !sel) { node.x = s.width / 2; node.y = s.height / 2; }
+  if (!node.is3D && !ed.sel) {
+    node.x = ed.project.settings.width / 2;
+    node.y = ed.project.settings.height / 2;
+  }
   parent.addChild(node);
   markDirty();
   select(node);
+  if (node.is3D && activeTab === '2d') setVpTab('3d');
 });
 
 function uniqueName(base) {
   let i = 1;
   const taken = new Set();
-  (function walk(n) { taken.add(n.name); n.children.forEach(walk); })(scene().root);
+  (function walk(n) { taken.add(n.name); n.children.forEach(walk); })(ed.scene().root);
   while (taken.has(base + i)) i++;
   return base + i;
 }
 
-// ---------------------------------------------------------------- inspector
+// -------------------------------------------------------------- inspector
 
 function refreshInspector() {
   const box = $('props');
+  if (!box) return;
+  const scrollY = box.scrollTop;
   box.innerHTML = '';
+  const sel = ed.sel;
 
   if (!sel || !sel.parent) {
-    // Root (or nothing) selected → project settings.
     box.appendChild(section('Project'));
-    box.appendChild(propRow('width', project.settings.width, 'number', (v) => { project.settings.width = +v; markDirty(); }));
-    box.appendChild(propRow('height', project.settings.height, 'number', (v) => { project.settings.height = +v; markDirty(); }));
-    box.appendChild(propRow('background', project.settings.background, 'color', (v) => { project.settings.background = v; markDirty(); }));
+    const s = ed.project.settings;
+    box.appendChild(propRow('width', s.width, 'number', (v) => { s.width = +v; markDirty(); }));
+    box.appendChild(propRow('height', s.height, 'number', (v) => { s.height = +v; markDirty(); }));
+    box.appendChild(propRow('background', s.background, 'color', (v) => { s.background = v; markDirty(); }));
+    box.appendChild(propRow('pixelated', s.pixelated, 'checkbox', (v) => { s.pixelated = v; markDirty(); }));
+    box.appendChild(enumRow('uiMode', s.uiMode || 'overlay', ['overlay', 'screen3d'], (v) => { s.uiMode = v; markDirty(); }));
+    box.appendChild(section('Physics'));
+    s.physics = s.physics || {};
+    box.appendChild(propRow('gravity', s.physics.gravity ?? 900, 'number', (v) => { s.physics.gravity = +v; markDirty(); }));
+    box.appendChild(section('Screen FX (CRT)'));
+    s.fx = s.fx || {};
+    box.appendChild(propRow('crt', !!s.fx.crt, 'checkbox', (v) => { s.fx.crt = v; markDirty(); }));
+    if (s.fx.crt) {
+      for (const [k, def] of [['curvature', 0.07], ['scanlines', 0.35], ['vignette', 0.35], ['flicker', 0.02], ['noise', 0.04], ['glow', 0.25], ['aberration', 0.0015]]) {
+        box.appendChild(propRow(k, s.fx[k] ?? def, 'number', (v) => { s.fx[k] = +v; markDirty(); }));
+      }
+    }
     if (sel) box.appendChild(scriptRow(sel));
     if (!sel) {
       const d = document.createElement('div');
       d.className = 'empty';
-      d.textContent = 'Select a node to edit it, or click the canvas.';
+      d.textContent = 'Select a node to edit it.';
       box.appendChild(d);
     }
+    box.scrollTop = scrollY;
     return;
   }
 
@@ -394,15 +303,60 @@ function refreshInspector() {
 
   box.appendChild(section('Properties'));
   for (const key of keys) {
+    if (HIDDEN_FIELDS.has(key)) continue;
     const val = sel[key] ?? defaults[key];
-    let kind = 'text';
-    if (typeof val === 'boolean') kind = 'checkbox';
-    else if (typeof val === 'number') kind = 'number';
-    else if (COLOR_KEYS.has(key) && /^#[0-9a-fA-F]{6}$/.test(String(val))) kind = 'color';
-    box.appendChild(propRow(key, val, kind, (v) => {
-      sel[key] = kind === 'number' ? +v : kind === 'checkbox' ? v : v;
-      markDirty();
-    }));
+    if (ENUM_FIELDS[key]) {
+      box.appendChild(enumRow(key, val, ENUM_FIELDS[key], (v) => { sel[key] = v; markDirty(); }));
+    } else if (IMAGE_FIELDS.has(key) || MODEL_FIELDS.has(key)) {
+      const names = Object.keys(ed.project.assets).filter((n) =>
+        MODEL_FIELDS.has(key) ? /\.(glb|gltf)$/i.test(n) : (ed.project.assets[n].startsWith('data:image') || /\.(png|jpe?g|webp|gif)$/i.test(n))
+      );
+      box.appendChild(enumRow(key, val, ['', ...names], (v) => { sel[key] = v; markDirty(); }));
+    } else {
+      let kind = 'text';
+      if (typeof val === 'boolean') kind = 'checkbox';
+      else if (typeof val === 'number') kind = 'number';
+      else if (COLOR_KEYS.has(key) && /^#[0-9a-fA-F]{6}$/.test(String(val))) kind = 'color';
+      box.appendChild(propRow(key, val, kind, (v) => {
+        sel[key] = kind === 'number' ? +v : v;
+        markDirty();
+      }));
+    }
+  }
+
+  // Physics quick-add for 2D visual nodes.
+  if (!sel.is3D && ['Rect', 'Circle', 'Sprite'].includes(sel.type) && sel.body === undefined) {
+    box.appendChild(section('Physics'));
+    box.appendChild(enumRow('body', '', ENUM_FIELDS.body, (v) => { if (v) sel.body = v; markDirty(); refreshInspector(); }));
+  }
+
+  // Tilemap painting tools.
+  if (sel.type === 'Tilemap') {
+    box.appendChild(section('Paint'));
+    const paintBtn = actionBtn(ed.paint.active ? '■ Stop painting' : '✏ Paint tiles', () => {
+      ed.paint.active = !ed.paint.active;
+      refreshInspector();
+    });
+    if (ed.paint.active) paintBtn.classList.add('on');
+    box.appendChild(paintBtn);
+    const pal = document.createElement('canvas');
+    pal.id = 'tilePalette';
+    drawPalette(pal, sel);
+    pal.addEventListener('click', (e) => {
+      const r = pal.getBoundingClientRect();
+      const scale = pal.width / r.width;
+      const tw = sel.tileW || 32;
+      const perRow = Math.max(1, Math.floor(pal.width / tw));
+      const c = Math.floor(((e.clientX - r.left) * scale) / tw);
+      const row = Math.floor(((e.clientY - r.top) * scale) / (sel.tileH || 32));
+      ed.paint.tile = row * perRow + c;
+      refreshInspector();
+    });
+    box.appendChild(pal);
+    const hint = document.createElement('div');
+    hint.className = 'paint-hint';
+    hint.textContent = `tile: ${ed.paint.tile} · shift/right-click = erase`;
+    box.appendChild(hint);
   }
 
   const actions = document.createElement('div');
@@ -411,22 +365,50 @@ function refreshInspector() {
     actionBtn('Duplicate', () => {
       const copy = hydrate(serialize(sel));
       copy.name = uniqueName(sel.name.replace(/\d+$/, ''));
-      copy.x = (copy.x || 0) + 20;
-      copy.y = (copy.y || 0) + 20;
+      if (!copy.is3D) { copy.x = (copy.x || 0) + 20; copy.y = (copy.y || 0) + 20; }
+      else copy.x = (copy.x || 0) + 1;
       sel.parent.addChild(copy);
       markDirty();
       select(copy);
     }),
     actionBtn('↑', () => reorder(-1)),
     actionBtn('↓', () => reorder(1)),
-    actionBtn('Delete', () => { deleteSel(); }, 'danger'),
+    actionBtn('Delete', deleteSel, 'danger'),
   );
   box.appendChild(actions);
+  box.scrollTop = scrollY;
+}
+
+function drawPalette(pal, map) {
+  const img = ed.assets.images[map.tileset];
+  const tw = map.tileW || 32, th = map.tileH || 32;
+  if (img && img.naturalWidth) {
+    pal.width = img.naturalWidth;
+    pal.height = img.naturalHeight;
+    const c = pal.getContext('2d');
+    c.imageSmoothingEnabled = false;
+    c.drawImage(img, 0, 0);
+    const perRow = Math.max(1, Math.floor(pal.width / tw));
+    c.strokeStyle = '#ff5c9e';
+    c.lineWidth = 2;
+    c.strokeRect((ed.paint.tile % perRow) * tw, Math.floor(ed.paint.tile / perRow) * th, tw, th);
+  } else {
+    pal.width = 4 * tw;
+    pal.height = th;
+    const c = pal.getContext('2d');
+    ['#5b8c5a', '#7a6a53', '#4a6d8c', '#8c5a5b'].forEach((col, i) => {
+      c.fillStyle = col;
+      c.fillRect(i * tw, 0, tw, th);
+    });
+    c.strokeStyle = '#ff5c9e';
+    c.lineWidth = 2;
+    c.strokeRect((ed.paint.tile % 4) * tw, 0, tw, th);
+  }
 }
 
 function reorder(dir) {
-  const sib = sel.parent.children;
-  const i = sib.indexOf(sel);
+  const sib = ed.sel.parent.children;
+  const i = sib.indexOf(ed.sel);
   const j = i + dir;
   if (j < 0 || j >= sib.length) return;
   [sib[i], sib[j]] = [sib[j], sib[i]];
@@ -435,9 +417,9 @@ function reorder(dir) {
 }
 
 function deleteSel() {
-  if (!sel || !sel.parent) return;
-  sel.destroy();
-  sel = null;
+  if (!ed.sel || !ed.sel.parent) return;
+  ed.sel.destroy();
+  ed.sel = null;
   markDirty();
   refreshAll();
 }
@@ -474,6 +456,18 @@ function propRow(label, value, kind, onChange) {
   return row;
 }
 
+function enumRow(label, value, options, onChange) {
+  const row = document.createElement('div');
+  row.className = 'prop-row';
+  const lab = document.createElement('label');
+  lab.textContent = label;
+  const selEl = document.createElement('select');
+  selEl.innerHTML = options.map((o) => `<option value="${o}"${o === value ? ' selected' : ''}>${o || '— none —'}</option>`).join('');
+  selEl.addEventListener('change', () => onChange(selEl.value));
+  row.append(lab, selEl);
+  return row;
+}
+
 function scriptRow(node) {
   const row = document.createElement('div');
   row.className = 'prop-row';
@@ -481,13 +475,12 @@ function scriptRow(node) {
   lab.textContent = 'script';
   const selEl = document.createElement('select');
   selEl.innerHTML = '<option value="">— none —</option>' +
-    Object.keys(project.scripts).map((n) => `<option${n === node.script ? ' selected' : ''}>${n}</option>`).join('') +
+    Object.keys(ed.project.scripts).map((n) => `<option${n === node.script ? ' selected' : ''}>${n}</option>`).join('') +
     '<option value="__new__">+ new script…</option>';
   selEl.addEventListener('change', () => {
     if (selEl.value === '__new__') {
       const name = addScript();
-      if (name) { node.script = name; }
-      refreshInspector();
+      if (name) node.script = name;
     } else {
       node.script = selEl.value || null;
     }
@@ -498,117 +491,157 @@ function scriptRow(node) {
   return row;
 }
 
+// ----------------------------------------------------------------- assets
+
+$('btnImportAsset').addEventListener('click', () => $('assetInput').click());
+$('assetInput').addEventListener('change', (e) => importAssetFiles(e.target.files));
+
+const assetGrid = $('assetGrid');
+assetGrid.addEventListener('dragover', (e) => { e.preventDefault(); assetGrid.classList.add('drop-ok'); });
+assetGrid.addEventListener('dragleave', () => assetGrid.classList.remove('drop-ok'));
+assetGrid.addEventListener('drop', (e) => {
+  e.preventDefault();
+  assetGrid.classList.remove('drop-ok');
+  importAssetFiles(e.dataTransfer.files);
+});
+
+async function importAssetFiles(files) {
+  for (const file of files) {
+    const url = await new Promise((res) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.readAsDataURL(file);
+    });
+    ed.project.assets[file.name] = url;
+  }
+  rebuildAssets();
+  markDirty();
+  refreshAssets();
+  refreshInspector();
+}
+
+function refreshAssets() {
+  assetGrid.innerHTML = '';
+  for (const [name, url] of Object.entries(ed.project.assets)) {
+    const card = document.createElement('div');
+    card.className = 'asset-card';
+    const isImg = url.startsWith('data:image') || /\.(png|jpe?g|webp|gif)$/i.test(name);
+    const icon = /\.(glb|gltf)$/i.test(name) ? '🧊' : url.startsWith('data:audio') ? '🔊' : '📄';
+    card.innerHTML =
+      (isImg ? `<img src="${url}" alt="">` : `<div class="asset-icon">${icon}</div>`) +
+      `<div class="asset-name" title="${name}">${name}</div>` +
+      `<button class="asset-del" title="Remove asset">✕</button>`;
+    card.querySelector('.asset-del').addEventListener('click', () => {
+      if (!confirm(`Remove asset "${name}"?`)) return;
+      delete ed.project.assets[name];
+      rebuildAssets();
+      markDirty();
+      refreshAssets();
+    });
+    assetGrid.appendChild(card);
+  }
+  if (!Object.keys(ed.project.assets).length) {
+    assetGrid.innerHTML = '<div class="empty" style="color:var(--dim);grid-column:1/-1;text-align:center;padding:20px">Drop images, audio, or .glb models here</div>';
+  }
+}
+
 // ---------------------------------------------------------------- scripts
 
 const codeEditor = new CodeEditor($('codePane'), {
   onChange: (src) => {
     if (currentScript) {
-      project.scripts[currentScript] = src;
-      markDirty(false); // typing shouldn't spam the undo stack
+      ed.project.scripts[currentScript] = src;
+      markDirty(false);
+      collab.sendDoc(serializeProject);
     }
   },
 });
 
 function refreshScripts() {
-  const list = $('scriptList');
-  list.innerHTML = '';
-  for (const name of Object.keys(project.scripts)) {
-    const row = document.createElement('div');
-    row.className = 'script-row' + (name === currentScript ? ' selected' : '');
-    row.textContent = name;
-    row.addEventListener('click', () => openScript(name));
-    list.appendChild(row);
-  }
-  openScript(currentScript);
+  const selEl = $('scriptSelect');
+  const names = Object.keys(ed.project.scripts);
+  selEl.innerHTML = names.map((n) => `<option${n === currentScript ? ' selected' : ''}>${n}</option>`).join('') || '<option value="">no scripts</option>';
+  openScript(currentScript || names[0]);
 }
 
 function openScript(name) {
-  currentScript = name && project.scripts[name] != null ? name : Object.keys(project.scripts)[0] || null;
-  $('codeFile').textContent = currentScript || 'no script';
-  codeEditor.setValue(currentScript ? project.scripts[currentScript] : '// Create a script with the ＋ button, then assign it to a node.\n// Hooks: ready(), update(dt), onPress(), onInput(e), onSignal(name, data)\n// Globals: self (this node), game (find, tween, after, every, emit, audio, rand…)');
-  document.querySelectorAll('.script-row').forEach((r) => r.classList.toggle('selected', r.textContent === currentScript));
+  currentScript = name && ed.project.scripts[name] != null ? name : Object.keys(ed.project.scripts)[0] || null;
+  codeEditor.setValue(currentScript ? ed.project.scripts[currentScript]
+    : '// Create a script with ＋, then assign it to a node in the Inspector.\n// Hooks: ready(), update(dt), onPress(), onInput(e), onSignal(n,d), onCollide(o,side)');
 }
+
+$('scriptSelect').addEventListener('change', (e) => openScript(e.target.value));
+$('btnAddScript').addEventListener('click', addScript);
+$('btnDelScript').addEventListener('click', () => {
+  if (!currentScript || !confirm(`Delete script "${currentScript}"?`)) return;
+  delete ed.project.scripts[currentScript];
+  currentScript = null;
+  markDirty();
+  refreshScripts();
+});
 
 function addScript() {
   let name = prompt('Script name', 'Script.js');
   if (!name) return null;
   if (!name.endsWith('.js')) name += '.js';
-  if (project.scripts[name] == null) {
-    project.scripts[name] = `function ready() {\n  \n}\n\nfunction update(dt) {\n  \n}\n`;
+  if (ed.project.scripts[name] == null) {
+    ed.project.scripts[name] = `function ready() {\n  \n}\n\nfunction update(dt) {\n  \n}\n`;
   }
+  currentScript = name;
   markDirty();
   refreshScripts();
-  openScript(name);
   return name;
 }
-
-$('btnAddScript').addEventListener('click', addScript);
-
-// tabs
-document.querySelectorAll('#bottom .tab').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('#bottom .tab').forEach((t) => t.classList.remove('active'));
-    tab.classList.add('active');
-    $('codePane').hidden = tab.dataset.tab !== 'code';
-    $('consolePane').hidden = tab.dataset.tab !== 'console';
-  });
-});
 
 // ---------------------------------------------------------------- console
 
 let conErrors = 0;
 const conOrig = {};
+(function hookConsoleForever() {
+  for (const kind of ['log', 'warn', 'error']) {
+    conOrig[kind] = console[kind];
+    console[kind] = (...args) => {
+      conOrig[kind](...args);
+      conLine(kind, args);
+    };
+  }
+  window.addEventListener('error', (e) => conLine('error', [e.message]));
+})();
+
 function conLine(kind, args) {
+  const pane = $('consolePane');
+  if (!pane) return;
   const div = document.createElement('div');
   div.className = 'con-line ' + kind;
   div.textContent = args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
-  $('consolePane').appendChild(div);
-  $('consolePane').scrollTop = 1e9;
-  if (kind === 'error') $('conCount').textContent = `(${++conErrors})`;
+  pane.appendChild(div);
+  while (pane.children.length > 500) pane.firstChild.remove();
+  pane.scrollTop = 1e9;
 }
 
-function hookConsole() {
-  conErrors = 0;
-  $('conCount').textContent = '';
-  $('consolePane').innerHTML = '';
-  for (const kind of ['log', 'warn', 'error']) {
-    conOrig[kind] = console[kind];
-    console[kind] = (...args) => { conOrig[kind](...args); conLine(kind, args); };
-  }
-  window.addEventListener('error', onWinError);
-}
-
-function unhookConsole() {
-  for (const kind of ['log', 'warn', 'error']) if (conOrig[kind]) console[kind] = conOrig[kind];
-  window.removeEventListener('error', onWinError);
-}
-
-const onWinError = (e) => conLine('error', [e.message]);
-
-// ---------------------------------------------------------------- play mode
+// -------------------------------------------------------------- play mode
 
 function startPlay() {
+  setVpTab('game');
   const json = serializeProject();
   const mount = $('playMount');
-  mount.hidden = false;
-  overlay.style.pointerEvents = 'none';
   mount.innerHTML = '<div class="stage"></div>';
   const stage = mount.firstChild;
   const fit = () => {
-    const r = vpWrap.getBoundingClientRect();
+    const r = mount.getBoundingClientRect();
     const s = Math.min(r.width / json.settings.width, r.height / json.settings.height) * 0.92;
     stage.style.width = json.settings.width * s + 'px';
     stage.style.height = json.settings.height * s + 'px';
   };
   fit();
-  hookConsole();
   try {
     playing = new Game(json, stage);
     playing.start();
+    window.__nekuGame = playing;
   } catch (e) {
-    conLine('error', ['game crashed on boot: ' + e.message]);
+    conLine('error', ['game crashed on boot: ' + (e.stack || e.message)]);
   }
-  $('btnPlay').textContent = '■ Stop';
+  $('btnPlay').textContent = '■ STOP';
   $('btnPlay').classList.add('playing');
 }
 
@@ -616,31 +649,86 @@ function stopPlay() {
   if (!playing) return;
   try { playing.stop(); } catch { /* already dead */ }
   playing = null;
-  unhookConsole();
-  $('playMount').hidden = true;
   $('playMount').innerHTML = '';
-  overlay.style.pointerEvents = 'auto';
-  $('btnPlay').textContent = '▶ Play';
+  $('btnPlay').textContent = '▶ PLAY';
   $('btnPlay').classList.remove('playing');
-  requestAnimationFrame(renderEditView);
+  if (activeTab === 'game') setVpTab('2d');
 }
 
 $('btnPlay').addEventListener('click', () => (playing ? stopPlay() : startPlay()));
 
+// ------------------------------------------------------------------ co-op
+
+const collab = new CollabClient({
+  onSnapshot: (doc) => loadProjectJson(doc, { keepSelection: true }),
+  onDoc: (doc) => loadProjectJson(doc, { keepSelection: true }),
+  onPeers: (list) => {
+    ed.peers.clear();
+    for (const p of list) if (p.id !== collab.id) ed.peers.set(p.id, p);
+    refreshPeersUI();
+    refreshTree();
+  },
+  onPresence: (m) => {
+    if (m.id === collab.id) return;
+    const peer = ed.peers.get(m.id) || {};
+    ed.peers.set(m.id, { ...peer, ...m });
+    refreshPeersUI();
+    refreshTree();
+  },
+  onStatus: (s) => {
+    $('btnCoop').classList.toggle('on', s === 'online');
+    $('btnCoop').textContent = s === 'online' ? '◉ Co-op ON' : '◉ Co-op';
+    if (s.startsWith('error')) conLine('error', ['[co-op] ' + s]);
+  },
+});
+
+function refreshPeersUI() {
+  const box = $('peers');
+  box.innerHTML = '';
+  for (const p of ed.peers.values()) {
+    const chip = document.createElement('span');
+    chip.className = 'peer-chip';
+    chip.style.background = p.color;
+    chip.title = p.name;
+    box.appendChild(chip);
+  }
+}
+
+$('btnCoop').addEventListener('click', () => {
+  if (collab.connected) {
+    if (confirm('Disconnect from co-op session?')) collab.disconnect();
+    return;
+  }
+  const url = prompt('Co-op server (run: npm run coop)', localStorage.getItem('neku-coop-url') || 'ws://localhost:8348');
+  if (!url) return;
+  const name = prompt('Your name', localStorage.getItem('neku-coop-name') || 'dev');
+  if (!name) return;
+  localStorage.setItem('neku-coop-url', url);
+  localStorage.setItem('neku-coop-name', name);
+  collab.connect({ url, room: ed.project.name, name });
+});
+
 // ---------------------------------------------------------------- toolbar
 
-$('projectName').addEventListener('change', () => { project.name = $('projectName').value; markDirty(); });
+$('projectName').addEventListener('change', () => { ed.project.name = $('projectName').value; markDirty(); });
+
+$('themeSelect').addEventListener('change', () => {
+  document.body.dataset.theme = $('themeSelect').value;
+  localStorage.setItem('neku-theme', $('themeSelect').value);
+});
 
 $('btnNew').addEventListener('click', () => {
-  if (!confirm('Start a new empty project? Unsaved work is kept in browser autosave only.')) return;
+  if (!confirm('Start a new empty project? (current work stays in browser autosave until then)')) return;
   loadProjectJson(emptyProjectJson());
   markDirty(false);
 });
 
 $('btnSample').addEventListener('click', async () => {
+  const which = prompt('Load sample: 1 = Casino Calculator (2D+3D)  ·  2 = Neku Arcade (3D room + CRT screen)', '2');
+  const file = which === '1' ? 'casino-calculator' : which === '2' ? 'neku-arcade' : null;
+  if (!file) return;
   try {
-    const json = await (await fetch('../projects/casino-calculator.json')).json();
-    loadProjectJson(json);
+    loadProjectJson(await (await fetch(`../projects/${file}.json`)).json());
     markDirty();
   } catch (e) {
     alert('Could not load sample: ' + e.message);
@@ -655,7 +743,7 @@ $('fileInput').addEventListener('change', async (e) => {
     loadProjectJson(JSON.parse(await file.text()));
     markDirty();
   } catch (err) {
-    alert('Not a valid CCE project: ' + err.message);
+    alert('Not a valid Neku project: ' + err.message);
   }
   e.target.value = '';
 });
@@ -668,76 +756,74 @@ function download(name, text, type = 'application/json') {
   URL.revokeObjectURL(a.href);
 }
 
+const slug = (s) => (s || 'game').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'game';
+
 $('btnSave').addEventListener('click', () => {
-  download(slug(project.name) + '.json', JSON.stringify(serializeProject(), null, 2));
+  download(slug(ed.project.name) + '.json', JSON.stringify(serializeProject(), null, 2));
 });
 
 $('btnExport').addEventListener('click', async () => {
   try {
-    const engineJs = await bundleEngine(async (f) => await (await fetch('../engine/' + f)).text());
-    download(slug(project.name) + '.html', buildExportHtml(engineJs, serializeProject()), 'text/html');
+    const html = await buildExport(serializeProject(), async (path) => await (await fetch('../' + path)).text());
+    download(slug(ed.project.name) + '.html', html, 'text/html');
   } catch (e) {
     alert('Export failed: ' + e.message);
+    conLine('error', ['export: ' + (e.stack || e.message)]);
   }
 });
 
-const slug = (s) => (s || 'game').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'game';
-
-// ---------------------------------------------------------------- keyboard
+// --------------------------------------------------------------- keyboard
 
 window.addEventListener('keydown', (e) => {
-  const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
+  const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName) ||
+    document.activeElement?.closest('.cm-editor');
   const mod = e.metaKey || e.ctrlKey;
   if (mod && e.key === 'Enter') { e.preventDefault(); playing ? stopPlay() : startPlay(); return; }
   if (inField || playing) return;
   if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
   if (mod && (e.key === 'Z' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); return; }
-  if (!sel) return;
+  if (!ed.sel) return;
   if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); deleteSel(); }
   const step = e.shiftKey ? 10 : 1;
-  if (e.key === 'ArrowLeft') { sel.x -= step; markDirty(); }
-  if (e.key === 'ArrowRight') { sel.x += step; markDirty(); }
-  if (e.key === 'ArrowUp') { sel.y -= step; markDirty(); }
-  if (e.key === 'ArrowDown') { sel.y += step; markDirty(); }
+  const map3d = { ArrowLeft: ['x', -0.25], ArrowRight: ['x', 0.25], ArrowUp: ['z', -0.25], ArrowDown: ['z', 0.25] };
+  const map2d = { ArrowLeft: ['x', -step], ArrowRight: ['x', step], ArrowUp: ['y', -step], ArrowDown: ['y', step] };
+  const m = (ed.sel.is3D ? map3d : map2d)[e.key];
+  if (m) {
+    e.preventDefault();
+    ed.sel[m[0]] = Math.round(((ed.sel[m[0]] || 0) + m[1]) * 100) / 100;
+    markDirty();
+    refreshInspector();
+  }
 });
 
-// ---------------------------------------------------------------- boot
+// ------------------------------------------------------------------- boot
 
 function refreshAll() {
   rebuildAssets();
   refreshTree();
   refreshInspector();
   refreshScripts();
+  refreshAssets();
 }
 
 (async function boot() {
-  const saved = localStorage.getItem('cce-project');
-  if (saved) {
-    try {
-      loadProjectJson(JSON.parse(saved));
-    } catch {
-      loadProjectJson(emptyProjectJson());
-    }
-  } else {
-    // First run: try the sample, fall back to an empty project.
-    try {
-      loadProjectJson(await (await fetch('../projects/casino-calculator.json')).json());
-    } catch {
-      loadProjectJson(emptyProjectJson());
-    }
-  }
-  resizeViewport();
-  requestAnimationFrame(renderEditView);
-})();
+  document.body.dataset.theme = localStorage.getItem('neku-theme') || 'neku-dark';
+  $('themeSelect').value = document.body.dataset.theme;
 
-// Debug/testing hooks (harmless in production; the editor is a dev tool).
-window.__cce = {
-  get project() { return project; },
-  get sel() { return sel; },
-  scene,
-  select,
-  renderEditView,
-  startPlay,
-  stopPlay,
-  serializeProject,
-};
+  const saved = localStorage.getItem('neku-project') || localStorage.getItem('cce-project');
+  if (saved) {
+    try { loadProjectJson(JSON.parse(saved)); }
+    catch { loadProjectJson(emptyProjectJson()); }
+  } else {
+    try { loadProjectJson(await (await fetch('../projects/neku-arcade.json')).json()); }
+    catch { loadProjectJson(emptyProjectJson()); }
+  }
+
+  (function loop() {
+    if (!playing) {
+      if (activeTab === '2d') vp2d.render();
+      else if (activeTab === '3d') vp3d.render();
+    }
+    requestAnimationFrame(loop);
+  })();
+})();

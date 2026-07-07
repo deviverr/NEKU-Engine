@@ -1,13 +1,14 @@
 {
-  "name": "casino-calculator-engine",
-  "version": "0.1.0",
-  "description": "CCE — a zero-dependency 2D/3D web game engine with a browser editor. Games export to a single HTML file.",
+  "name": "neku-engine",
+  "version": "0.2.0",
+  "description": "Neku Engine — 2D/3D web game engine with a pixel-UI browser editor, live team co-op, CRT effects, and single-file HTML export.",
   "type": "module",
   "license": "MIT",
   "repository": "github:deviverr/Casino-Calculator-Engine",
   "scripts": {
     "start": "node tools/serve.js",
-    "sample": "node tools/build-sample.js",
-    "export": "node tools/export.js projects/casino-calculator.json dist/casino-calculator.html"
+    "coop": "node tools/collab.js",
+    "samples": "node tools/build-sample.js && node tools/build-arcade.js",
+    "export": "node tools/export.js projects/neku-arcade.json dist/neku-arcade.html"
   }
 }

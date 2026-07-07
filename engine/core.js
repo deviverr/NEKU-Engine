@@ -1,39 +1,51 @@
-// CCE core — scene tree, scripting, tweens, timers, game loop.
+// Neku core — scene tree, scripting, tweens, timers, physics, animation, FX.
 //
 // A game is a JSON project: scenes (trees of nodes), scripts (JS source),
-// assets (data-URL images), settings. Scripts attach to nodes and declare
-// plain functions as lifecycle hooks:
+// assets (data-URL images/models/audio), settings. Scripts attach to nodes
+// and declare plain functions as lifecycle hooks:
 //
-//   function ready() {}          // node entered the running scene
-//   function update(dt) {}       // every frame, dt in seconds
-//   function onPress() {}        // this Button was clicked/tapped
-//   function onInput(e) {}       // raw pointer/keyboard events
-//   function onSignal(name, d) {}// game.emit(name, data) from any script
+//   function ready() {}              // node entered the running scene
+//   function update(dt) {}           // every frame, dt in seconds
+//   function onPress() {}            // this Button (2D) or Mesh3D was clicked
+//   function onInput(e) {}           // raw pointer/keyboard events
+//   function onSignal(name, d) {}    // game.emit(name, data) from any script
+//   function onCollide(other, side) {} // physics contact (dynamic bodies)
 //
 // Inside a script, `self` is the node and `game` is the Game instance.
+// 3D rendering (Three.js) loads dynamically only when a scene uses 3D nodes,
+// so 2D-only games stay tiny.
 
 import { Easing, clamp, lerp, rand, randInt, pick } from './math.js';
 import { AudioEngine } from './audio.js';
 import { Input } from './input.js';
 import { render2D, hitTest } from './renderer2d.js';
-import { Renderer3D } from './renderer3d.js';
+import { Physics2D } from './physics2d.js';
+import { ScreenFX } from './fx.js';
 
 export const NODE_TYPES = {
-  // 2D
+  // --- 2D ---
   Node: { x: 0, y: 0 },
   Rect: { x: 0, y: 0, w: 100, h: 100, color: '#4a90d9', radius: 0, rotation: 0, opacity: 1 },
   Circle: { x: 0, y: 0, radius: 40, color: '#e2b714', opacity: 1 },
   Label: { x: 0, y: 0, text: 'Label', size: 24, color: '#ffffff', align: 'center', bold: false, opacity: 1 },
-  Sprite: { x: 0, y: 0, asset: '', w: 0, h: 0, rotation: 0, opacity: 1 },
+  Sprite: { x: 0, y: 0, asset: '', w: 0, h: 0, rotation: 0, opacity: 1, sheetCols: 1, sheetRows: 1, frame: 0, fps: 8, playing: false },
   Button: { x: 0, y: 0, w: 120, h: 48, text: 'Button', color: '#2d6a4f', textColor: '#ffffff', textSize: 20, radius: 10, opacity: 1 },
   Particles: { x: 0, y: 0, color: '#ffd700', gravity: 600, opacity: 1 },
-  // 3D (is3D flag set in hydrate)
-  Camera3D: { x: 0, y: 2, z: 6, tx: 0, ty: 0, tz: 0, fov: 55 },
-  Light3D: { dx: 0.5, dy: 1, dz: 0.8, ambient: 0.35 },
-  Mesh3D: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1, shape: 'box', w: 1, h: 1, d: 1, radius: 0.5, color: '#e0b040' },
+  Tilemap: { x: 0, y: 0, tileset: '', tileW: 32, tileH: 32, cols: 10, rows: 8, tiles: [], collision: false, opacity: 1 },
+  // --- 3D ---
+  Node3D: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 },
+  Camera3D: { x: 0, y: 2, z: 6, tx: 0, ty: 0, tz: 0, fov: 55, near: 0.1, far: 500 },
+  Light3D: { x: 2, y: 4, z: 3, kind: 'directional', color: '#ffffff', intensity: 1, tx: 0, ty: 0, tz: 0 },
+  Mesh3D: {
+    x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1,
+    shape: 'box', w: 1, h: 1, d: 1, radius: 0.5, model: '',
+    color: '#cccccc', texture: '', metalness: 0.1, roughness: 0.75,
+    emissive: '', emissiveIntensity: 1, opacity: 1, unlit: false, wireframe: false,
+  },
+  Screen3D: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1, w: 2, h: 1.5, glow: 0.9 },
 };
 
-const IS_3D = new Set(['Camera3D', 'Light3D', 'Mesh3D']);
+const IS_3D = new Set(['Node3D', 'Camera3D', 'Light3D', 'Mesh3D', 'Screen3D']);
 
 let nextId = 1;
 
@@ -45,7 +57,7 @@ export class GameNode {
     this.is3D = IS_3D.has(type);
     this.children = [];
     this.parent = null;
-    this.script = props.script || null; // script file name
+    this.script = props.script || null;
     this.visible = true;
     Object.assign(this, NODE_TYPES[type] || {}, props);
     if (type === 'Particles') this._particles = [];
@@ -57,7 +69,6 @@ export class GameNode {
     return node;
   }
 
-  // Depth-first search by node name.
   find(name) {
     for (const c of this.children) {
       if (c.name === name) return c;
@@ -76,12 +87,11 @@ export class GameNode {
     this._dead = true;
   }
 
-  // Particle burst (Particles nodes only).
   burst(count = 20, opts = {}) {
     if (!this._particles) return;
     const colors = opts.colors || [this.color || '#ffd700'];
     for (let i = 0; i < count; i++) {
-      const a = opts.angle != null ? opts.angle + rand(-opts.spread ?? 0.5, opts.spread ?? 0.5) : rand(0, Math.PI * 2);
+      const a = opts.angle != null ? opts.angle + rand(-(opts.spread ?? 0.5), opts.spread ?? 0.5) : rand(0, Math.PI * 2);
       const sp = rand(opts.minSpeed ?? 120, opts.maxSpeed ?? 420);
       this._particles.push({
         x: 0, y: 0,
@@ -96,7 +106,6 @@ export class GameNode {
   }
 }
 
-// JSON node → GameNode tree.
 export function hydrate(def) {
   const { children = [], type = 'Node', ...props } = def;
   const node = new GameNode(type, props);
@@ -104,19 +113,24 @@ export function hydrate(def) {
   return node;
 }
 
-// GameNode tree → JSON (used by the editor to save).
 export function serialize(node) {
   const out = { type: node.type, name: node.name };
   const defaults = NODE_TYPES[node.type] || {};
   for (const key of Object.keys(node)) {
     if (key.startsWith('_') || ['id', 'type', 'name', 'is3D', 'children', 'parent', 'script', 'visible'].includes(key)) continue;
     if (typeof node[key] === 'function') continue;
-    if (node[key] !== defaults[key]) out[key] = node[key];
+    const v = node[key];
+    if (Array.isArray(v) ? JSON.stringify(v) !== JSON.stringify(defaults[key]) : v !== defaults[key]) out[key] = v;
   }
   if (node.script) out.script = node.script;
   if (node.visible === false) out.visible = false;
   if (node.children.length) out.children = node.children.map(serialize);
   return out;
+}
+
+export function treeHas3D(node) {
+  if (node.is3D || IS_3D.has(node.type)) return true;
+  return (node.children || []).some(treeHas3D);
 }
 
 function compileScript(name, src) {
@@ -128,11 +142,12 @@ ${src}
   onPress: typeof onPress === 'function' ? onPress : null,
   onInput: typeof onInput === 'function' ? onInput : null,
   onSignal: typeof onSignal === 'function' ? onSignal : null,
+  onCollide: typeof onCollide === 'function' ? onCollide : null,
 };`;
   try {
     return new Function('self', 'game', body);
   } catch (e) {
-    console.error(`[cce] script "${name}" failed to compile: ${e.message}`);
+    console.error(`[neku] script "${name}" failed to compile: ${e.message}`);
     return null;
   }
 }
@@ -145,41 +160,59 @@ export class Game {
     this.width = s.width || 480;
     this.height = s.height || 720;
     this.background = s.background || '#111';
+    this.pixelated = !!s.pixelated;
+    this.uiMode = s.uiMode || 'overlay'; // 'overlay' | 'screen3d'
+    this.fx = s.fx || null;
     this.time = 0;
     this.audio = new AudioEngine();
+    this.physics = new Physics2D(s.physics || {});
     this._tweens = [];
     this._timers = [];
     this._signals = new Map();
     this._running = false;
+    this.gl3d = null; // set async when the scene uses 3D
 
-    // Stacked canvases: WebGL below, Canvas2D above (2D UI over 3D world).
     container.innerHTML = '';
     container.style.position = 'relative';
+    container.style.background = this.background;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const mk = () => {
+    this.dpr = dpr;
+    const mk = (backing = true) => {
       const c = document.createElement('canvas');
-      c.width = this.width * dpr;
-      c.height = this.height * dpr;
+      if (backing) { c.width = this.width * dpr; c.height = this.height * dpr; }
       Object.assign(c.style, { position: 'absolute', inset: '0', width: '100%', height: '100%' });
+      if (this.pixelated) c.style.imageRendering = 'pixelated';
       container.appendChild(c);
       return c;
     };
-    this.glCanvas = mk();
+    this.glCanvas = mk(false); // Three.js manages its own backing size
     this.canvas2d = mk();
-    this.dpr = dpr;
     this.ctx = this.canvas2d.getContext('2d');
-    this.gl3d = new Renderer3D(this.glCanvas);
-    // The scene background lives on the container so the transparent 2D
-    // canvas never hides the 3D layer underneath it.
-    container.style.background = this.background;
-    this.input = new Input(this.canvas2d, this.width, this.height);
+    if (this.pixelated) this.ctx.imageSmoothingEnabled = false;
+    if (this.fx?.crt) {
+      this.fxCanvas = mk();
+      this.screenFx = new ScreenFX(this.fxCanvas);
+      this.glCanvas.style.visibility = 'hidden';
+      this.canvas2d.style.visibility = 'hidden';
+    }
+    if (this.uiMode === 'screen3d') this.canvas2d.style.visibility = 'hidden';
+    this._blank = document.createElement('canvas');
+    this._blank.width = this._blank.height = 1;
 
-    // Decode data-URL image assets.
-    this.assets = { images: {} };
+    // Input listens on the topmost visible canvas.
+    this.inputSurface = this.fxCanvas || this.canvas2d;
+    this.input = new Input(this.inputSurface, this.width, this.height);
+
+    // Assets: data URLs. Images get an <img> for the 2D renderer; every
+    // asset keeps its URL for Three loaders (textures, GLTF) and audio.
+    this.assets = { images: {}, urls: {} };
     for (const [name, url] of Object.entries(project.assets || {})) {
-      const img = new Image();
-      img.src = url;
-      this.assets.images[name] = img;
+      this.assets.urls[name] = url;
+      if (url.startsWith('data:image') || /\.(png|jpe?g|webp|gif)$/i.test(name)) {
+        const img = new Image();
+        img.src = url;
+        this.assets.images[name] = img;
+      }
     }
 
     this._compiledScripts = {};
@@ -190,14 +223,27 @@ export class Game {
     this.gotoScene(project.mainScene || project.scenes?.[0]?.name);
   }
 
+  async _ensure3D() {
+    if (this.gl3d || this._loading3d) return;
+    this._loading3d = true;
+    try {
+      const { Render3D, THREE } = await import('./render3d.js');
+      this.gl3d = new Render3D(this.glCanvas, { pixelated: this.pixelated });
+      this.THREE = THREE; // escape hatch for advanced scripts
+    } catch (e) {
+      console.error('[neku] 3D failed to load: ' + e.message);
+    }
+  }
+
   gotoScene(name) {
     const def = (this.project.scenes || []).find((sc) => sc.name === name);
     if (!def) {
-      console.error(`[cce] scene not found: "${name}"`);
+      console.error(`[neku] scene not found: "${name}"`);
       return;
     }
     this.sceneName = name;
     this.root = hydrate(def.root);
+    if (treeHas3D(this.root)) this._ensure3D();
     this._tweens = [];
     this._timers = [];
     this._pendingReady = [];
@@ -211,7 +257,7 @@ export class Game {
       try {
         node._hooks = this._compiledScripts[node.script](node, this);
       } catch (e) {
-        console.error(`[cce] script "${node.script}" threw during setup: ${e.message}`);
+        console.error(`[neku] script "${node.script}" threw during setup: ${e.message}`);
         node._hooks = null;
       }
       if (node._hooks?.ready) {
@@ -227,7 +273,7 @@ export class Game {
     try {
       fn();
     } catch (e) {
-      console.error('[cce] script error: ' + (e.stack || e.message));
+      console.error('[neku] script error: ' + (e.stack || e.message));
     }
   }
 
@@ -241,6 +287,7 @@ export class Game {
     const p = typeof parent === 'string' ? this.find(parent) : parent || this.root;
     const node = new GameNode(type, props);
     p.addChild(node);
+    if (node.is3D) this._ensure3D();
     if (props.script) {
       this._pendingReady = null;
       this._bindScripts(node);
@@ -281,7 +328,6 @@ export class Game {
     this._signals.get(name).push(fn);
   }
 
-  // Handy re-exports so scripts don't need imports.
   rand = rand;
   randInt = randInt;
   pick = pick;
@@ -298,8 +344,12 @@ export class Game {
       const dt = Math.min((now - last) / 1000, 0.05);
       last = now;
       this.time += dt;
-      this._update(dt);
-      this._render();
+      try {
+        this._update(dt);
+        this._render();
+      } catch (e) {
+        console.error('[neku] frame error: ' + (e.stack || e.message));
+      }
       this.input.endFrame();
       this._raf = requestAnimationFrame(frame);
     };
@@ -310,10 +360,10 @@ export class Game {
     this._running = false;
     cancelAnimationFrame(this._raf);
     this.input.destroy();
+    this.gl3d?.dispose();
   }
 
   _update(dt) {
-    // Input events: button hit-testing + raw event hooks.
     for (const e of this.input.drainEvents()) {
       if (e.type === 'pointerdown' || e.type === 'pointermove' || e.type === 'pointerup') {
         this._pointer(e);
@@ -325,7 +375,6 @@ export class Game {
       walk(this.root);
     }
 
-    // Timers.
     for (const t of this._timers) {
       if (t.dead) continue;
       if (this.time >= t.at) {
@@ -336,7 +385,6 @@ export class Game {
     }
     this._timers = this._timers.filter((t) => !t.dead);
 
-    // Tweens.
     for (const tw of this._tweens) {
       tw.t += dt;
       if (tw.t < 0) continue;
@@ -350,9 +398,18 @@ export class Game {
     }
     this._tweens = this._tweens.filter((t) => !t.done);
 
-    // Scripts + particles.
+    // Physics: dynamic bodies + collision signals.
+    this.physics.step(this.root, dt, (a, b, side) => {
+      if (a._hooks?.onCollide) this._safely(() => a._hooks.onCollide(b, side));
+      if (b?._hooks?.onCollide) this._safely(() => b._hooks.onCollide(a, side === 'overlap' ? 'overlap' : opposite(side)));
+    });
+
+    // Scripts, sprite animation, particles.
     const walk = (n) => {
       if (n._dead) return;
+      if (n.type === 'Sprite' && n.playing && (n.sheetCols > 1 || n.sheetRows > 1)) {
+        n.frame = (n.frame + (n.fps || 8) * dt) % (n.sheetCols * n.sheetRows);
+      }
       if (n._hooks?.update) this._safely(() => n._hooks.update(dt));
       if (n._particles) {
         for (const p of n._particles) {
@@ -369,11 +426,31 @@ export class Game {
   }
 
   _pointer(e) {
-    // Find topmost interactive Button under the pointer.
+    // 3D picking: clickable meshes + Screen3D UIs.
+    if (this.gl3d) {
+      const hit = this.gl3d.pick(e.x / this.width, e.y / this.height);
+      if (hit) {
+        if (hit.node.type === 'Screen3D' && hit.uv) {
+          // Forward the hit into 2D UI space via the surface's UV coords.
+          this._pointer2D({ type: e.type, x: hit.uv.x * this.width, y: (1 - hit.uv.y) * this.height });
+          return;
+        }
+        if (e.type === 'pointerup') {
+          if (hit.node._hooks?.onPress) this._safely(() => hit.node._hooks.onPress());
+          this.emit('press3d', hit.node.name);
+        }
+      }
+    }
+    // Overlay 2D UI gets the raw pointer; in screen3d mode the 2D UI only
+    // exists on 3D surfaces, so raw pointer events don't reach it directly.
+    if (this.uiMode !== 'screen3d') this._pointer2D(e);
+  }
+
+  _pointer2D(e) {
     let target = null;
     const walk = (n) => {
       if (n.visible === false) return;
-      if (n.type === 'Button' && (n.opacity ?? 1) > 0 && hitTest(n, e.x, e.y)) target = n; // later in tree = on top
+      if (n.type === 'Button' && (n.opacity ?? 1) > 0 && hitTest(n, e.x, e.y)) target = n;
       for (const c of n.children) walk(c);
     };
     walk(this.root);
@@ -406,12 +483,26 @@ export class Game {
   }
 
   _render() {
-    if (this.gl3d?.gl) this.gl3d.render(this.root, this.width, this.height);
+    // 2D first so Screen3D's CanvasTexture picks up this frame's UI.
     render2D(this.ctx, this.root, this.assets, this.width, this.height, null, this.dpr);
+    if (this.gl3d) this.gl3d.render(this.root, this.assets, this.width, this.height, this.canvas2d);
+    if (this.screenFx) {
+      this.screenFx.render(
+        this.gl3d ? this.glCanvas : null,
+        this.uiMode === 'screen3d' ? this._blank : this.canvas2d,
+        this.time,
+        this.fx,
+        this.width * this.dpr,
+        this.height * this.dpr
+      );
+    }
   }
 }
 
-// Boot a project inside a DOM element. Returns the Game (call .stop() to kill).
+function opposite(side) {
+  return { top: 'bottom', bottom: 'top', left: 'right', right: 'left' }[side] || side;
+}
+
 export function startGame(project, container) {
   const game = new Game(project, container);
   game.start();

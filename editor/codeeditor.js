@@ -1,121 +1,107 @@
-// CCE code editor — a transparent <textarea> stacked over a highlighted
-// <pre>. ~zero weight, no dependencies, good enough for game scripts.
+// Neku Studio script editor — CodeMirror 6 (vendored) with Neku API
+// autocomplete and pixel-theme styling driven by the app's CSS variables.
 
-const KEYWORDS = new Set(
-  ('const let var function return if else for while do switch case break continue new class extends ' +
-    'typeof instanceof in of try catch finally throw async await yield import export default null ' +
-    'undefined true false this super delete void static get set').split(' ')
-);
+import {
+  basicSetup, EditorView, EditorState, Compartment, keymap,
+  javascript, autocompletion, indentWithTab,
+  HighlightStyle, syntaxHighlighting, tags,
+} from '../vendor/codemirror.js';
 
-const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// Colors come from CSS classes so theme switching restyles code instantly.
+const nekuHighlight = HighlightStyle.define([
+  { tag: [tags.keyword, tags.operatorKeyword, tags.controlKeyword, tags.definitionKeyword], class: 'tk-kw' },
+  { tag: [tags.string, tags.special(tags.string), tags.regexp], class: 'tk-str' },
+  { tag: [tags.number, tags.bool, tags.null], class: 'tk-num' },
+  { tag: [tags.comment, tags.blockComment, tags.lineComment], class: 'tk-com' },
+  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], class: 'tk-fn' },
+  { tag: tags.propertyName, class: 'tk-prop' },
+  { tag: tags.variableName, class: 'tk-var' },
+]);
 
-export function highlight(src) {
-  let out = '';
-  let i = 0;
-  const n = src.length;
-  while (i < n) {
-    const ch = src[i];
-    // comments
-    if (ch === '/' && src[i + 1] === '/') {
-      let j = src.indexOf('\n', i);
-      if (j === -1) j = n;
-      out += `<span class="tk-com">${esc(src.slice(i, j))}</span>`;
-      i = j;
-    } else if (ch === '/' && src[i + 1] === '*') {
-      let j = src.indexOf('*/', i + 2);
-      j = j === -1 ? n : j + 2;
-      out += `<span class="tk-com">${esc(src.slice(i, j))}</span>`;
-      i = j;
-    } else if (ch === '"' || ch === "'" || ch === '`') {
-      let j = i + 1;
-      while (j < n && (src[j] !== ch || src[j - 1] === '\\')) j++;
-      j = Math.min(j + 1, n);
-      out += `<span class="tk-str">${esc(src.slice(i, j))}</span>`;
-      i = j;
-    } else if (/[0-9]/.test(ch) && !/[a-zA-Z_$]/.test(src[i - 1] || '')) {
-      let j = i;
-      while (j < n && /[0-9a-fA-Fx.eE_]/.test(src[j])) j++;
-      out += `<span class="tk-num">${esc(src.slice(i, j))}</span>`;
-      i = j;
-    } else if (/[a-zA-Z_$]/.test(ch)) {
-      let j = i;
-      while (j < n && /[a-zA-Z0-9_$]/.test(src[j])) j++;
-      const word = src.slice(i, j);
-      let k = j;
-      while (k < n && src[k] === ' ') k++;
-      if (KEYWORDS.has(word)) out += `<span class="tk-kw">${word}</span>`;
-      else if (src[k] === '(') out += `<span class="tk-fn">${word}</span>`;
-      else if (src[i - 1] === '.') out += `<span class="tk-prop">${word}</span>`;
-      else out += word;
-      i = j;
-    } else {
-      out += esc(ch);
-      i++;
-    }
-  }
-  return out;
+const NEKU_COMPLETIONS = [
+  // hooks
+  ...['ready()', 'update(dt)', 'onPress()', 'onInput(e)', 'onSignal(name, data)', 'onCollide(other, side)'].map((s) => ({
+    label: 'function ' + s.split('(')[0],
+    apply: `function ${s} {\n  \n}`,
+    type: 'keyword',
+    detail: 'neku hook',
+  })),
+  // game api
+  ...[
+    ['game.find(name)', 'find node by name'],
+    ['game.spawn(parent, type, props)', 'create a node'],
+    ['game.tween(node, to, opts)', 'animate properties'],
+    ['game.after(seconds, fn)', 'one-shot timer'],
+    ['game.every(seconds, fn)', 'repeating timer'],
+    ['game.emit(name, data)', 'broadcast signal'],
+    ['game.on(name, fn)', 'listen for signal'],
+    ['game.audio.play(name)', "sfx: 'click coin win lose jackpot spin'"],
+    ['game.audio.tone({freq, type, duration})', 'custom synth tone'],
+    ['game.rand(lo, hi)', 'random float'],
+    ['game.randInt(lo, hi)', 'random int'],
+    ['game.pick(array)', 'random element'],
+    ['game.clamp(v, lo, hi)', ''],
+    ['game.lerp(a, b, t)', ''],
+    ['game.input.isDown(key)', 'keyboard state'],
+    ['game.input.pointer', '{x, y, down}'],
+    ['game.gotoScene(name)', 'switch scene'],
+    ['game.time', 'seconds since start'],
+    ['self.destroy()', 'remove this node'],
+    ['self.find(name)', 'find in children'],
+    ['self.burst(count, opts)', 'particles only'],
+  ].map(([label, detail]) => ({ label, apply: label.split('(')[0], type: 'function', detail })),
+  ...['self.x', 'self.y', 'self.vx', 'self.vy', 'self.visible', 'self.text', 'self.color', 'self.frame', 'self.playing'].map(
+    (label) => ({ label, type: 'property' })
+  ),
+];
+
+function nekuComplete(ctx) {
+  const word = ctx.matchBefore(/[\w.]+/);
+  if (!word || (word.from === word.to && !ctx.explicit)) return null;
+  return {
+    from: word.from,
+    options: NEKU_COMPLETIONS.filter((o) => o.label.startsWith(word.text) || o.label.includes(word.text)),
+    validFor: /^[\w.]*$/,
+  };
 }
 
 export class CodeEditor {
   constructor(container, { onChange } = {}) {
-    container.innerHTML = `
-      <div class="ce">
-        <pre><code></code></pre>
-        <div class="gutter"></div>
-        <textarea spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
-      </div>`;
-    this.pre = container.querySelector('pre');
-    this.code = container.querySelector('code');
-    this.gutter = container.querySelector('.gutter');
-    this.ta = container.querySelector('textarea');
     this.onChange = onChange;
+    this._silence = false;
+    this.view = new EditorView({
+      parent: container,
+      state: this._state(''),
+    });
+  }
 
-    this.ta.addEventListener('input', () => {
-      this.render();
-      this.onChange?.(this.ta.value);
-    });
-    this.ta.addEventListener('scroll', () => {
-      this.pre.scrollTop = this.ta.scrollTop;
-      this.pre.scrollLeft = this.ta.scrollLeft;
-      this.gutter.scrollTop = this.ta.scrollTop;
-    });
-    this.ta.addEventListener('keydown', (e) => {
-      if (e.key === 'Tab') {
-        e.preventDefault();
-        const { selectionStart: s, selectionEnd: end, value } = this.ta;
-        this.ta.setRangeText('  ', s, end, 'end');
-        this.render();
-        this.onChange?.(this.ta.value);
-      }
-      if (e.key === 'Enter') {
-        // keep indentation of the current line
-        e.preventDefault();
-        const { selectionStart: s, value } = this.ta;
-        const lineStart = value.lastIndexOf('\n', s - 1) + 1;
-        const indent = (value.slice(lineStart).match(/^[ ]*/) || [''])[0];
-        const extra = /[{([]\s*$/.test(value.slice(lineStart, s)) ? '  ' : '';
-        this.ta.setRangeText('\n' + indent + extra, s, this.ta.selectionEnd, 'end');
-        this.render();
-        this.onChange?.(this.ta.value);
-      }
-      e.stopPropagation(); // don't trigger editor-level shortcuts (Delete etc.)
+  _state(doc) {
+    return EditorState.create({
+      doc,
+      extensions: [
+        basicSetup,
+        javascript(),
+        syntaxHighlighting(nekuHighlight),
+        autocompletion({ override: [nekuComplete] }),
+        keymap.of([indentWithTab]),
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged && !this._silence) this.onChange?.(this.view.state.doc.toString());
+        }),
+        EditorView.theme({
+          '&': { height: '100%' },
+          '.cm-scroller': { fontFamily: 'var(--mono)' },
+        }),
+      ],
     });
   }
 
   setValue(v) {
-    this.ta.value = v ?? '';
-    this.render();
+    this._silence = true;
+    this.view.setState(this._state(v ?? ''));
+    this._silence = false;
   }
 
   getValue() {
-    return this.ta.value;
-  }
-
-  render() {
-    const src = this.ta.value;
-    this.code.innerHTML = highlight(src) + '\n';
-    const lines = src.split('\n').length;
-    this.gutter.textContent = Array.from({ length: lines }, (_, i) => i + 1).join('\n');
-    this.pre.scrollTop = this.ta.scrollTop;
+    return this.view.state.doc.toString();
   }
 }

@@ -49,7 +49,8 @@ keyRows.forEach((row, r) => {
 const sceneRoot = n('Node', { name: 'Main', script: 'Calculator.js' }, [
   // --- 3D backdrop: dim golden coin spinning behind the UI ---
   n('Camera3D', { name: 'Camera', x: 0, y: 0.4, z: 7, ty: 0.2, fov: 45 }),
-  n('Light3D', { name: 'Sun', dx: 0.4, dy: 1, dz: 0.9, ambient: 0.4 }),
+  n('Light3D', { name: 'Sun', kind: 'directional', x: 2, y: 5, z: 4, intensity: 1.6 }),
+  n('Light3D', { name: 'Fill', kind: 'ambient', intensity: 0.55 }),
   n('Mesh3D', {
     name: 'Coin',
     script: 'Coin3D.js',

@@ -27,10 +27,17 @@
           {
             "type": "Light3D",
             "name": "Sun",
-            "dx": 0.4,
-            "dy": 1,
-            "dz": 0.9,
-            "ambient": 0.4
+            "kind": "directional",
+            "x": 2,
+            "y": 5,
+            "z": 4,
+            "intensity": 1.6
+          },
+          {
+            "type": "Light3D",
+            "name": "Fill",
+            "kind": "ambient",
+            "intensity": 0.55
           },
           {
             "type": "Mesh3D",
