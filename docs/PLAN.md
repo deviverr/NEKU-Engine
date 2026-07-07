@@ -45,7 +45,7 @@ builds for macOS / Windows / Linux.
 - [x] G2 README overhaul: mascot, downloads section, file formats, plugins
 - [x] G3 docs/PUBLISHING.md — itch.io + GitHub Pages for games; putting Neku Studio itself on itch.io
 - [x] G4 GitHub Release v1.0.0: desktop zips + sample game exports attached
+- [x] G5 GitHub Pages hosted Studio + v1.0.1 rebuild with mascot decoded from the attached ASCII art
 - [x] G5 Full browser + desktop verification pass
-- [x] G6 GitHub Pages hosted Studio + v1.0.1 rebuild with mascot decoded from the attached ASCII art
 
 Execution order: A → F (testers get builds even if time runs short) → B → C → D → E → G.

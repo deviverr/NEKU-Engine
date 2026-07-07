@@ -1,0 +1,1427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+<title>Neku Breakout</title>
+<meta name="generator" content="Neku Engine" />
+<style>html, body { margin: 0; height: 100%; background: #0b0e14; display: grid; place-items: center; overflow: hidden; }
+  #game { box-shadow: 0 12px 60px rgba(0,0,0,.6); border-radius: 8px; overflow: hidden; }</style>
+</head>
+<body>
+<div id="game"></div>
+<script>
+// ---- engine/math.js ----
+// CCE math — vectors, 4x4 matrices for the 3D renderer, easing curves.
+
+const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+const lerp = (a, b, t) => a + (b - a) * t;
+const rand = (lo = 0, hi = 1) => lo + Math.random() * (hi - lo);
+const randInt = (lo, hi) => Math.floor(rand(lo, hi + 1));
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const DEG = Math.PI / 180;
+
+// --- Mat4 (column-major, WebGL layout) ---
+
+function mat4Identity() {
+  return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+}
+
+function mat4Multiply(a, b) {
+  const out = new Float32Array(16);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      out[c * 4 + r] =
+        a[r] * b[c * 4] +
+        a[4 + r] * b[c * 4 + 1] +
+        a[8 + r] * b[c * 4 + 2] +
+        a[12 + r] * b[c * 4 + 3];
+    }
+  }
+  return out;
+}
+
+function mat4Perspective(fovDeg, aspect, near, far) {
+  const f = 1 / Math.tan((fovDeg * DEG) / 2);
+  const nf = 1 / (near - far);
+  const out = new Float32Array(16);
+  out[0] = f / aspect;
+  out[5] = f;
+  out[10] = (far + near) * nf;
+  out[11] = -1;
+  out[14] = 2 * far * near * nf;
+  return out;
+}
+
+function mat4LookAt(eye, target, up = [0, 1, 0]) {
+  let zx = eye[0] - target[0], zy = eye[1] - target[1], zz = eye[2] - target[2];
+  let len = Math.hypot(zx, zy, zz) || 1;
+  zx /= len; zy /= len; zz /= len;
+  let xx = up[1] * zz - up[2] * zy, xy = up[2] * zx - up[0] * zz, xz = up[0] * zy - up[1] * zx;
+  len = Math.hypot(xx, xy, xz) || 1;
+  xx /= len; xy /= len; xz /= len;
+  const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+  return new Float32Array([
+    xx, yx, zx, 0,
+    xy, yy, zy, 0,
+    xz, yz, zz, 0,
+    -(xx * eye[0] + xy * eye[1] + xz * eye[2]),
+    -(yx * eye[0] + yy * eye[1] + yz * eye[2]),
+    -(zx * eye[0] + zy * eye[1] + zz * eye[2]),
+    1,
+  ]);
+}
+
+// Compose translation * rotXYZ * scale in one pass.
+function mat4Compose(x, y, z, rx, ry, rz, sx, sy, sz) {
+  const cx = Math.cos(rx), sxn = Math.sin(rx);
+  const cy = Math.cos(ry), syn = Math.sin(ry);
+  const cz = Math.cos(rz), szn = Math.sin(rz);
+  // R = Rz * Ry * Rx
+  const r00 = cz * cy, r01 = cz * syn * sxn - szn * cx, r02 = cz * syn * cx + szn * sxn;
+  const r10 = szn * cy, r11 = szn * syn * sxn + cz * cx, r12 = szn * syn * cx - cz * sxn;
+  const r20 = -syn, r21 = cy * sxn, r22 = cy * cx;
+  return new Float32Array([
+    r00 * sx, r10 * sx, r20 * sx, 0,
+    r01 * sy, r11 * sy, r21 * sy, 0,
+    r02 * sz, r12 * sz, r22 * sz, 0,
+    x, y, z, 1,
+  ]);
+}
+
+// --- Easing (t in [0,1]) ---
+
+const Easing = {
+  linear: (t) => t,
+  quadOut: (t) => t * (2 - t),
+  quadIn: (t) => t * t,
+  cubicOut: (t) => 1 + --t * t * t,
+  cubicIn: (t) => t * t * t,
+  backOut: (t) => 1 + 2.70158 * Math.pow(t - 1, 3) + 1.70158 * Math.pow(t - 1, 2),
+  elasticOut: (t) =>
+    t === 0 || t === 1 ? t : Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * ((2 * Math.PI) / 3)) + 1,
+  bounceOut: (t) => {
+    const n = 7.5625, d = 2.75;
+    if (t < 1 / d) return n * t * t;
+    if (t < 2 / d) return n * (t -= 1.5 / d) * t + 0.75;
+    if (t < 2.5 / d) return n * (t -= 2.25 / d) * t + 0.9375;
+    return n * (t -= 2.625 / d) * t + 0.984375;
+  },
+};
+
+// ---- engine/audio.js ----
+// CCE audio — WebAudio synth. All sound effects are generated in code,
+// so games ship with zero audio files.
+
+class AudioEngine {
+  constructor() {
+    this.ctx = null;
+    this.volume = 0.5;
+    this.muted = false;
+  }
+
+  // Browsers require a user gesture before audio can start.
+  _ensure() {
+    if (!this.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      this.ctx = new AC();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = this.volume;
+      this.master.connect(this.ctx.destination);
+    }
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    return this.ctx;
+  }
+
+  setVolume(v) {
+    this.volume = v;
+    if (this.master) this.master.gain.value = this.muted ? 0 : v;
+  }
+
+  tone({ freq = 440, type = 'sine', duration = 0.15, delay = 0, slide = 0, gain = 0.6 }) {
+    const ctx = this._ensure();
+    if (!ctx || this.muted) return;
+    const t0 = ctx.currentTime + delay;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (slide) osc.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t0 + duration);
+    g.gain.setValueAtTime(gain, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + duration);
+    osc.connect(g).connect(this.master);
+    osc.start(t0);
+    osc.stop(t0 + duration + 0.02);
+  }
+
+  noise({ duration = 0.2, delay = 0, gain = 0.4, filter = 1800 }) {
+    const ctx = this._ensure();
+    if (!ctx || this.muted) return;
+    const t0 = ctx.currentTime + delay;
+    const len = Math.max(1, (duration * ctx.sampleRate) | 0);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const f = ctx.createBiquadFilter();
+    f.type = 'lowpass';
+    f.frequency.value = filter;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(gain, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + duration);
+    src.connect(f).connect(g).connect(this.master);
+    src.start(t0);
+  }
+
+  // Named presets so game scripts can just do game.audio.play('coin').
+  play(name) {
+    const p = AudioEngine.presets[name];
+    if (p) p(this);
+    else console.warn(`[cce] unknown sound: "${name}"`);
+  }
+}
+
+AudioEngine.presets = {
+  click: (a) => a.tone({ freq: 700, type: 'square', duration: 0.05, gain: 0.25 }),
+  tick: (a) => a.tone({ freq: 1100, type: 'square', duration: 0.03, gain: 0.15 }),
+  pop: (a) => a.tone({ freq: 320, type: 'sine', duration: 0.09, slide: 260, gain: 0.5 }),
+  coin: (a) => {
+    a.tone({ freq: 988, type: 'square', duration: 0.09, gain: 0.3 });
+    a.tone({ freq: 1319, type: 'square', duration: 0.22, delay: 0.08, gain: 0.3 });
+  },
+  win: (a) => {
+    [523, 659, 784, 1047].forEach((f, i) =>
+      a.tone({ freq: f, type: 'triangle', duration: 0.18, delay: i * 0.09, gain: 0.4 })
+    );
+  },
+  lose: (a) => {
+    a.tone({ freq: 300, type: 'sawtooth', duration: 0.25, slide: -140, gain: 0.35 });
+    a.tone({ freq: 220, type: 'sawtooth', duration: 0.4, delay: 0.2, slide: -120, gain: 0.35 });
+  },
+  jackpot: (a) => {
+    [523, 659, 784, 1047, 1319, 1568].forEach((f, i) =>
+      a.tone({ freq: f, type: 'square', duration: 0.16, delay: i * 0.07, gain: 0.35 })
+    );
+    for (let i = 0; i < 8; i++)
+      a.tone({ freq: 900 + Math.random() * 900, type: 'square', duration: 0.08, delay: 0.5 + i * 0.06, gain: 0.2 });
+  },
+  spin: (a) => a.noise({ duration: 0.35, gain: 0.2, filter: 900 }),
+  whoosh: (a) => a.noise({ duration: 0.25, gain: 0.3, filter: 2500 }),
+};
+
+// ---- engine/input.js ----
+// CCE input — pointer + keyboard, normalized to game canvas coordinates.
+
+class Input {
+  constructor(canvas, width, height) {
+    this.canvas = canvas;
+    this.width = width;
+    this.height = height;
+    this.pointer = { x: 0, y: 0, down: false };
+    this.keys = new Set();
+    this._justPressed = new Set();
+    this._events = []; // drained by the game loop each frame
+    this._listeners = [];
+
+    const on = (target, type, fn) => {
+      target.addEventListener(type, fn);
+      this._listeners.push([target, type, fn]);
+    };
+
+    const toGame = (e) => {
+      const r = canvas.getBoundingClientRect();
+      const cx = (e.touches ? e.touches[0] : e).clientX;
+      const cy = (e.touches ? e.touches[0] : e).clientY;
+      return {
+        x: ((cx - r.left) / r.width) * this.width,
+        y: ((cy - r.top) / r.height) * this.height,
+      };
+    };
+
+    on(canvas, 'pointerdown', (e) => {
+      const p = toGame(e);
+      this.pointer.x = p.x;
+      this.pointer.y = p.y;
+      this.pointer.down = true;
+      this._events.push({ type: 'pointerdown', x: p.x, y: p.y });
+    });
+    on(canvas, 'pointermove', (e) => {
+      const p = toGame(e);
+      this.pointer.x = p.x;
+      this.pointer.y = p.y;
+      this._events.push({ type: 'pointermove', x: p.x, y: p.y });
+    });
+    on(window, 'pointerup', (e) => {
+      if (!this.pointer.down) return;
+      this.pointer.down = false;
+      const p = toGame(e);
+      this._events.push({ type: 'pointerup', x: p.x, y: p.y });
+    });
+    on(window, 'keydown', (e) => {
+      this.beforeKey?.(e); // game hook: e.g. preventDefault while a TextInput has focus
+      if (!this.keys.has(e.key)) this._justPressed.add(e.key);
+      this.keys.add(e.key);
+      this._events.push({ type: 'keydown', key: e.key });
+    });
+    on(window, 'keyup', (e) => {
+      this.keys.delete(e.key);
+      this._events.push({ type: 'keyup', key: e.key });
+    });
+  }
+
+  isDown(key) {
+    return this.keys.has(key);
+  }
+
+  justPressed(key) {
+    return this._justPressed.has(key);
+  }
+
+  drainEvents() {
+    const ev = this._events;
+    this._events = [];
+    return ev;
+  }
+
+  endFrame() {
+    this._justPressed.clear();
+  }
+
+  destroy() {
+    for (const [t, type, fn] of this._listeners) t.removeEventListener(type, fn);
+    this._listeners = [];
+  }
+}
+
+// ---- engine/renderer2d.js ----
+// CCE 2D renderer — Canvas2D scene-tree walker.
+// Draw order is tree order: children render after (on top of) their parent.
+
+function render2D(ctx, root, assets, width, height, background, dpr = 1) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (background) {
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, width, height);
+  } else {
+    ctx.clearRect(0, 0, width, height);
+  }
+  drawNode(ctx, root, assets, 1);
+}
+
+// Exported for the editor, which drives its own canvas transform (pan/zoom).
+function drawNode(ctx, node, assets, parentAlpha) {
+  if (node.visible === false) return;
+  if (node.is3D) return; // 3D branch handled by the GL renderer
+
+  const alpha = parentAlpha * (node.opacity ?? 1);
+  if (alpha <= 0) return;
+
+  ctx.save();
+  ctx.translate(node.x || 0, node.y || 0);
+  if (node.rotation) ctx.rotate((node.rotation * Math.PI) / 180);
+  const sx = node.scaleX ?? 1, sy = node.scaleY ?? 1;
+  if (sx !== 1 || sy !== 1) ctx.scale(sx, sy);
+  ctx.globalAlpha = alpha;
+
+  PAINTERS[node.type]?.(ctx, node, assets);
+
+  for (const child of node.children) drawNode(ctx, child, assets, alpha);
+  ctx.restore();
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  r = Math.min(r || 0, w / 2, h / 2);
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+  else ctx.rect(x, y, w, h);
+}
+
+function fillStroke(ctx, node) {
+  if (node.color && node.color !== 'none') {
+    ctx.fillStyle = node.color;
+    ctx.fill();
+  }
+  if (node.strokeColor && node.strokeWidth) {
+    ctx.strokeStyle = node.strokeColor;
+    ctx.lineWidth = node.strokeWidth;
+    ctx.stroke();
+  }
+}
+
+const PAINTERS = {
+  Rect(ctx, n) {
+    roundRect(ctx, -n.w / 2, -n.h / 2, n.w, n.h, n.radius);
+    fillStroke(ctx, n);
+  },
+
+  Circle(ctx, n) {
+    ctx.beginPath();
+    ctx.arc(0, 0, n.radius, 0, Math.PI * 2);
+    fillStroke(ctx, n);
+  },
+
+  Label(ctx, n) {
+    ctx.font = `${n.bold ? 'bold ' : ''}${n.size || 16}px ${n.font || 'system-ui, sans-serif'}`;
+    ctx.textAlign = n.align || 'center';
+    ctx.textBaseline = 'middle';
+    if (n.shadow) {
+      ctx.fillStyle = n.shadow;
+      ctx.fillText(n.text ?? '', 2, 2);
+    }
+    ctx.fillStyle = n.color || '#fff';
+    ctx.fillText(n.text ?? '', 0, 0);
+  },
+
+  Sprite(ctx, n, assets) {
+    const img = assets.images[n.asset];
+    if (!img || !img.naturalWidth) {
+      // Missing texture: draw a checker placeholder instead of crashing.
+      const w = n.w || 32, h = n.h || 32;
+      ctx.fillStyle = '#f0f';
+      ctx.fillRect(-w / 2, -h / 2, w / 2, h / 2);
+      ctx.fillRect(0, 0, w / 2, h / 2);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, -h / 2, w / 2, h / 2);
+      ctx.fillRect(-w / 2, 0, w / 2, h / 2);
+      return;
+    }
+    const cols = n.sheetCols || 1, rows = n.sheetRows || 1;
+    if (cols > 1 || rows > 1) {
+      // Sprite-sheet frame (animated via `frame`/`fps`/`playing` props).
+      const fw = img.naturalWidth / cols, fh = img.naturalHeight / rows;
+      const f = Math.floor(n.frame || 0) % (cols * rows);
+      const w = n.w || fw, h = n.h || fh;
+      ctx.drawImage(img, (f % cols) * fw, Math.floor(f / cols) * fh, fw, fh, -w / 2, -h / 2, w, h);
+      return;
+    }
+    const w = n.w || img.naturalWidth, h = n.h || img.naturalHeight;
+    ctx.drawImage(img, -w / 2, -h / 2, w, h);
+  },
+
+  Tilemap(ctx, n, assets) {
+    const img = assets.images[n.tileset];
+    const tw = n.tileW || 32, th = n.tileH || 32;
+    const cols = n.cols || 0, rows = n.rows || 0;
+    const ox = -(cols * tw) / 2, oy = -(rows * th) / 2;
+    const setCols = img && img.naturalWidth ? Math.max(1, Math.floor(img.naturalWidth / tw)) : 1;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const t = n.tiles?.[r * cols + c] ?? -1;
+        if (t < 0) continue;
+        if (img && img.naturalWidth) {
+          ctx.drawImage(img, (t % setCols) * tw, Math.floor(t / setCols) * th, tw, th, ox + c * tw, oy + r * th, tw, th);
+        } else {
+          // No tileset image: render solid tiles so layout is still visible.
+          ctx.fillStyle = ['#5b8c5a', '#7a6a53', '#4a6d8c', '#8c5a5b'][t % 4];
+          ctx.fillRect(ox + c * tw, oy + r * th, tw, th);
+        }
+      }
+    }
+  },
+
+  Button(ctx, n) {
+    const base = n.color || '#2d6a4f';
+    ctx.save();
+    if (n._pressed) ctx.translate(0, 2);
+    roundRect(ctx, -n.w / 2, -n.h / 2, n.w, n.h, n.radius ?? 10);
+    ctx.fillStyle = n._pressed ? n.pressColor || shade(base, -25) : n._hover ? n.hoverColor || shade(base, 15) : base;
+    ctx.fill();
+    if (n.strokeColor && n.strokeWidth) {
+      ctx.strokeStyle = n.strokeColor;
+      ctx.lineWidth = n.strokeWidth;
+      ctx.stroke();
+    }
+    ctx.font = `${n.bold === false ? '' : 'bold '}${n.textSize || 20}px ${n.font || 'system-ui, sans-serif'}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = n.textColor || '#fff';
+    ctx.fillText(n.text ?? '', 0, 1);
+    ctx.restore();
+  },
+
+  TextInput(ctx, n) {
+    roundRect(ctx, -n.w / 2, -n.h / 2, n.w, n.h, n.radius ?? 6);
+    ctx.fillStyle = n.bg || '#10231a';
+    ctx.fill();
+    ctx.strokeStyle = n._focused ? '#ffffff' : n.border || '#29e6c4';
+    ctx.lineWidth = n._focused ? 3 : 2;
+    ctx.stroke();
+    const pad = 12;
+    const size = n.size || 18;
+    ctx.font = `${size}px ${n.font || 'ui-monospace, monospace'}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const showPlaceholder = !n.text && !n._focused;
+    ctx.fillStyle = showPlaceholder ? 'rgba(160,170,180,0.55)' : n.color || '#fff';
+    let text = showPlaceholder ? n.placeholder ?? '' : n.text ?? '';
+    // Clip overflowing text from the left so the caret stays visible.
+    while (text.length && ctx.measureText(text).width > n.w - pad * 2) text = text.slice(1);
+    ctx.fillText(text, -n.w / 2 + pad, 1);
+    if (n._focused && Math.floor(Date.now() / 500) % 2 === 0) {
+      const cx = -n.w / 2 + pad + ctx.measureText(text).width + 2;
+      ctx.fillStyle = n.color || '#fff';
+      ctx.fillRect(cx, -size / 2, 2, size);
+    }
+  },
+
+  Particles(ctx, n) {
+    if (!n._particles) return;
+    for (const p of n._particles) {
+      ctx.globalAlpha = Math.max(0, p.life / p.maxLife) * ctx.globalAlpha;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  },
+};
+
+// Lighten (positive) or darken (negative) a hex color by pct.
+function shade(hex, pct) {
+  const n = parseInt(hex.replace('#', ''), 16);
+  if (Number.isNaN(n)) return hex;
+  const f = (c) => Math.max(0, Math.min(255, Math.round(c + (pct / 100) * 255)));
+  const r = f((n >> 16) & 255), g = f((n >> 8) & 255), b = f(n & 255);
+  return `rgb(${r},${g},${b})`;
+}
+
+// World-space point → is it inside this Button? Used for hit-testing.
+// Walks the parent chain to build the world transform (rotation-aware).
+function hitTest(node, px, py) {
+  const chain = [];
+  for (let n = node; n; n = n.parent) chain.push(n);
+  // Transform the point into the node's local space by inverting each ancestor.
+  let x = px, y = py;
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const n = chain[i];
+    x -= n.x || 0;
+    y -= n.y || 0;
+    if (n.rotation) {
+      const a = (-n.rotation * Math.PI) / 180;
+      const c = Math.cos(a), s = Math.sin(a);
+      const nx = x * c - y * s, ny = x * s + y * c;
+      x = nx; y = ny;
+    }
+    const sx = n.scaleX ?? 1, sy = n.scaleY ?? 1;
+    if (sx !== 1) x /= sx || 1e-6;
+    if (sy !== 1) y /= sy || 1e-6;
+  }
+  return Math.abs(x) <= node.w / 2 && Math.abs(y) <= node.h / 2;
+}
+
+// ---- engine/physics2d.js ----
+// Neku 2D physics server — arcade physics: velocity, gravity, AABB collision.
+// Not a rigid-body simulator; it's the classic platformer/arcade model:
+// dynamic bodies move and collide against static bodies (axis-separated
+// resolve) and overlap-test against each other (signals only).
+//
+// Node props: body: 'dynamic' | 'static' | 'area', vx, vy, gravityScale,
+// bounce (0..1), colliderW/colliderH (default node bounds).
+// Script hook: function onCollide(other, side) {}   side: 'top|bottom|left|right|overlap'
+
+class Physics2D {
+  constructor(settings = {}) {
+    this.gravity = settings.gravity ?? 900; // px/s²
+  }
+
+  _bounds(n, wp) {
+    const w = n.colliderW ?? n.w ?? (n.radius ? n.radius * 2 : 32);
+    const h = n.colliderH ?? n.h ?? (n.radius ? n.radius * 2 : 32);
+    return { x: wp.x - w / 2, y: wp.y - h / 2, w, h };
+  }
+
+  // World position ignoring rotation (arcade model: physics bodies don't rotate).
+  _worldPos(n) {
+    let x = 0, y = 0;
+    for (let p = n; p; p = p.parent) { x += p.x || 0; y += p.y || 0; }
+    return { x, y };
+  }
+
+  step(root, dt, emit) {
+    const dynamics = [], statics = [], areas = [];
+    const walk = (n) => {
+      if (n._dead || n.visible === false) return;
+      if (n.body === 'dynamic') dynamics.push(n);
+      else if (n.body === 'static') statics.push(n);
+      else if (n.body === 'area') areas.push(n);
+      if (n.type === 'Tilemap' && n.collision) statics.push(n); // handled specially
+      for (const c of n.children) walk(c);
+    };
+    walk(root);
+
+    for (const n of dynamics) {
+      n.vx = n.vx || 0;
+      n.vy = (n.vy || 0) + this.gravity * (n.gravityScale ?? 1) * dt;
+      n._grounded = false;
+
+      // X axis
+      n.x += n.vx * dt;
+      this._resolveAxis(n, statics, 'x', emit);
+      // Y axis
+      n.y += n.vy * dt;
+      this._resolveAxis(n, statics, 'y', emit);
+
+      // Overlap events (areas + other dynamics)
+      const a = this._bounds(n, this._worldPos(n));
+      for (const other of [...areas, ...dynamics]) {
+        if (other === n) continue;
+        const b = this._bounds(other, this._worldPos(other));
+        if (a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y) {
+          emit(n, other, 'overlap');
+        }
+      }
+    }
+  }
+
+  _tiles(map, region) {
+    // Static AABBs from solid tilemap cells intersecting `region`.
+    const wp = this._worldPos(map);
+    const tw = map.tileW || 32, th = map.tileH || 32;
+    const originX = wp.x - ((map.cols || 0) * tw) / 2;
+    const originY = wp.y - ((map.rows || 0) * th) / 2;
+    const boxes = [];
+    const c0 = Math.max(0, Math.floor((region.x - originX) / tw) - 1);
+    const c1 = Math.min((map.cols || 0) - 1, Math.floor((region.x + region.w - originX) / tw) + 1);
+    const r0 = Math.max(0, Math.floor((region.y - originY) / th) - 1);
+    const r1 = Math.min((map.rows || 0) - 1, Math.floor((region.y + region.h - originY) / th) + 1);
+    for (let r = r0; r <= r1; r++)
+      for (let c = c0; c <= c1; c++)
+        if ((map.tiles?.[r * map.cols + c] ?? -1) >= 0)
+          boxes.push({ x: originX + c * tw, y: originY + r * th, w: tw, h: th, node: map });
+    return boxes;
+  }
+
+  _resolveAxis(n, statics, axis, emit) {
+    const wp = this._worldPos(n);
+    const a = this._bounds(n, wp);
+    let boxes = [];
+    for (const s of statics) {
+      if (s.type === 'Tilemap') boxes.push(...this._tiles(s, a));
+      else {
+        const b = this._bounds(s, this._worldPos(s));
+        b.node = s;
+        boxes.push(b);
+      }
+    }
+    for (const b of boxes) {
+      if (!(a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y)) continue;
+      if (axis === 'x') {
+        const push = n.vx > 0 ? b.x - (a.x + a.w) : b.x + b.w - a.x;
+        n.x += push;
+        a.x += push;
+        emit(n, b.node, n.vx > 0 ? 'right' : 'left');
+        n.vx = -n.vx * (n.bounce ?? 0);
+      } else {
+        const push = n.vy > 0 ? b.y - (a.y + a.h) : b.y + b.h - a.y;
+        n.y += push;
+        a.y += push;
+        emit(n, b.node, n.vy > 0 ? 'bottom' : 'top');
+        if (n.vy > 0) n._grounded = true;
+        n.vy = -n.vy * (n.bounce ?? 0);
+        if (Math.abs(n.vy) < 20) n.vy = 0;
+      }
+    }
+  }
+}
+
+// ---- engine/fx.js ----
+// Neku screen FX — CRT post-processing (the Casino Calculator look).
+// Composites the 3D and 2D canvases into one WebGL pass with curvature,
+// scanlines, vignette, flicker, noise and glow. Zero dependencies.
+//
+// settings.fx = { crt: true, curvature: 0.07, scanlines: 0.35, vignette: 0.35,
+//                 flicker: 0.02, noise: 0.04, glow: 0.25, aberration: 0.0015 }
+
+const VS = `
+attribute vec2 aPos;
+varying vec2 vUv;
+void main() { vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+const FS = `
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D u3d, u2d;
+uniform float uTime, uCurve, uScan, uVig, uFlicker, uNoise, uGlow, uAberr, uHas3d;
+uniform vec2 uRes;
+
+vec2 curve(vec2 uv) {
+  uv = uv * 2.0 - 1.0;
+  uv *= 1.0 + uCurve * (abs(uv.yx * uv.yx));
+  return uv * 0.5 + 0.5;
+}
+
+float rand(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }
+
+vec4 screen(vec2 uv) {
+  vec4 base = uHas3d > 0.5 ? texture2D(u3d, uv) : vec4(0.0);
+  vec4 ui = texture2D(u2d, uv);
+  return vec4(mix(base.rgb, ui.rgb, ui.a), max(base.a, ui.a));
+}
+
+void main() {
+  vec2 uv = curve(vUv);
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+  vec4 col = screen(uv);
+  if (uAberr > 0.0) {
+    col.r = screen(uv + vec2(uAberr, 0.0)).r;
+    col.b = screen(uv - vec2(uAberr, 0.0)).b;
+  }
+  if (uGlow > 0.0) {
+    vec2 px = 1.5 / uRes;
+    vec4 blur = screen(uv + vec2(px.x, 0.)) + screen(uv - vec2(px.x, 0.))
+              + screen(uv + vec2(0., px.y)) + screen(uv - vec2(0., px.y));
+    col.rgb += blur.rgb * 0.25 * uGlow;
+  }
+  float scan = sin(uv.y * uRes.y * 3.14159) * 0.5 + 0.5;
+  col.rgb *= 1.0 - uScan * (1.0 - scan) * 0.9;
+  col.rgb *= 1.0 - uVig * length(vUv - 0.5) * 1.4;
+  col.rgb *= 1.0 + uFlicker * sin(uTime * 120.0);
+  col.rgb += (rand(uv + fract(uTime)) - 0.5) * uNoise;
+  gl_FragColor = vec4(col.rgb, 1.0);
+}`;
+
+class ScreenFX {
+  constructor(canvas) {
+    const gl = (this.gl = canvas.getContext('webgl', { antialias: false }));
+    if (!gl) return;
+    const sh = (type, src) => {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('[neku fx] ' + gl.getShaderInfoLog(s));
+      return s;
+    };
+    const p = (this.prog = gl.createProgram());
+    gl.attachShader(p, sh(gl.VERTEX_SHADER, VS));
+    gl.attachShader(p, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(p);
+    gl.useProgram(p);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    const aPos = gl.getAttribLocation(p, 'aPos');
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+    this.u = {};
+    for (const name of ['u3d', 'u2d', 'uTime', 'uCurve', 'uScan', 'uVig', 'uFlicker', 'uNoise', 'uGlow', 'uAberr', 'uRes', 'uHas3d'])
+      this.u[name] = gl.getUniformLocation(p, name);
+    this.tex3d = this._makeTex(0);
+    this.tex2d = this._makeTex(1);
+    gl.uniform1i(this.u.u3d, 0);
+    gl.uniform1i(this.u.u2d, 1);
+  }
+
+  _makeTex(unit) {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+
+  render(canvas3d, canvas2d, time, fx, outW, outH) {
+    const gl = this.gl;
+    if (!gl) return;
+    const out = gl.canvas;
+    const w = outW || canvas2d.width, h = outH || canvas2d.height;
+    if (out.width !== w || out.height !== h) {
+      out.width = w;
+      out.height = h;
+    }
+    gl.viewport(0, 0, out.width, out.height);
+    gl.useProgram(this.prog);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.tex3d);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    const has3d = canvas3d && canvas3d.width > 0;
+    if (has3d) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas3d);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.tex2d);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas2d);
+
+    gl.uniform1f(this.u.uTime, time);
+    gl.uniform1f(this.u.uCurve, fx.curvature ?? 0.07);
+    gl.uniform1f(this.u.uScan, fx.scanlines ?? 0.35);
+    gl.uniform1f(this.u.uVig, fx.vignette ?? 0.35);
+    gl.uniform1f(this.u.uFlicker, fx.flicker ?? 0.02);
+    gl.uniform1f(this.u.uNoise, fx.noise ?? 0.04);
+    gl.uniform1f(this.u.uGlow, fx.glow ?? 0.25);
+    gl.uniform1f(this.u.uAberr, fx.aberration ?? 0.0015);
+    gl.uniform1f(this.u.uHas3d, has3d ? 1 : 0);
+    gl.uniform2f(this.u.uRes, out.width, out.height);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+}
+
+// ---- engine/core.js ----
+// Neku core — scene tree, scripting, tweens, timers, physics, animation, FX.
+//
+// A game is a JSON project: scenes (trees of nodes), scripts (JS source),
+// assets (data-URL images/models/audio), settings. Scripts attach to nodes
+// and declare plain functions as lifecycle hooks:
+//
+//   function ready() {}              // node entered the running scene
+//   function update(dt) {}           // every frame, dt in seconds
+//   function onPress() {}            // this Button (2D) or Mesh3D was clicked
+//   function onInput(e) {}           // raw pointer/keyboard events
+//   function onSignal(name, d) {}    // game.emit(name, data) from any script
+//   function onCollide(other, side) {} // physics contact (dynamic bodies)
+//
+// Inside a script, `self` is the node and `game` is the Game instance.
+// 3D rendering (Three.js) loads dynamically only when a scene uses 3D nodes,
+// so 2D-only games stay tiny.
+
+
+
+
+
+
+
+const NODE_TYPES = {
+  // --- 2D ---
+  Node: { x: 0, y: 0 },
+  Rect: { x: 0, y: 0, w: 100, h: 100, color: '#4a90d9', radius: 0, rotation: 0, opacity: 1 },
+  Circle: { x: 0, y: 0, radius: 40, color: '#e2b714', opacity: 1 },
+  Label: { x: 0, y: 0, text: 'Label', size: 24, color: '#ffffff', align: 'center', bold: false, opacity: 1 },
+  Sprite: { x: 0, y: 0, asset: '', w: 0, h: 0, rotation: 0, opacity: 1, sheetCols: 1, sheetRows: 1, frame: 0, fps: 8, playing: false },
+  Button: { x: 0, y: 0, w: 120, h: 48, text: 'Button', color: '#2d6a4f', textColor: '#ffffff', textSize: 20, radius: 10, opacity: 1 },
+  Particles: { x: 0, y: 0, color: '#ffd700', gravity: 600, opacity: 1 },
+  Tilemap: { x: 0, y: 0, tileset: '', tileW: 32, tileH: 32, cols: 10, rows: 8, tiles: [], collision: false, opacity: 1 },
+  TextInput: {
+    x: 0, y: 0, w: 220, h: 42, text: '', placeholder: 'type here…', size: 18,
+    color: '#ffffff', bg: '#10231a', border: '#29e6c4', radius: 6, maxLength: 64, opacity: 1,
+  },
+  // --- 3D ---
+  Node3D: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 },
+  Camera3D: { x: 0, y: 2, z: 6, tx: 0, ty: 0, tz: 0, fov: 55, near: 0.1, far: 500 },
+  Light3D: { x: 2, y: 4, z: 3, kind: 'directional', color: '#ffffff', intensity: 1, tx: 0, ty: 0, tz: 0 },
+  Mesh3D: {
+    x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1,
+    shape: 'box', w: 1, h: 1, d: 1, radius: 0.5, model: '',
+    color: '#cccccc', texture: '', metalness: 0.1, roughness: 0.75,
+    emissive: '', emissiveIntensity: 1, opacity: 1, unlit: false, wireframe: false,
+    body3d: '', mass: 1, friction: 0.3, restitution: 0.2,
+  },
+  Screen3D: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1, w: 2, h: 1.5, glow: 0.9 },
+};
+
+const IS_3D = new Set(['Node3D', 'Camera3D', 'Light3D', 'Mesh3D', 'Screen3D']);
+
+let nextId = 1;
+
+class GameNode {
+  constructor(type, props = {}) {
+    this.id = 'n' + nextId++;
+    this.type = type;
+    this.name = props.name || type;
+    this.is3D = IS_3D.has(type);
+    this.children = [];
+    this.parent = null;
+    this.script = props.script || null;
+    this.visible = true;
+    Object.assign(this, NODE_TYPES[type] || {}, props);
+    if (type === 'Particles') this._particles = [];
+  }
+
+  addChild(node) {
+    node.parent = this;
+    this.children.push(node);
+    return node;
+  }
+
+  find(name) {
+    for (const c of this.children) {
+      if (c.name === name) return c;
+      const hit = c.find(name);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  destroy() {
+    if (this.parent) {
+      const i = this.parent.children.indexOf(this);
+      if (i >= 0) this.parent.children.splice(i, 1);
+      this.parent = null;
+    }
+    this._dead = true;
+  }
+
+  burst(count = 20, opts = {}) {
+    if (!this._particles) return;
+    const colors = opts.colors || [this.color || '#ffd700'];
+    for (let i = 0; i < count; i++) {
+      const a = opts.angle != null ? opts.angle + rand(-(opts.spread ?? 0.5), opts.spread ?? 0.5) : rand(0, Math.PI * 2);
+      const sp = rand(opts.minSpeed ?? 120, opts.maxSpeed ?? 420);
+      this._particles.push({
+        x: 0, y: 0,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - (opts.up ?? 200),
+        size: rand(opts.minSize ?? 3, opts.maxSize ?? 7),
+        color: pick(colors),
+        life: rand(0.5, opts.life ?? 1.2),
+        maxLife: opts.life ?? 1.2,
+      });
+    }
+  }
+}
+
+function hydrate(def) {
+  const { children = [], type = 'Node', ...props } = def;
+  const node = new GameNode(type, props);
+  for (const c of children) node.addChild(hydrate(c));
+  return node;
+}
+
+function serialize(node) {
+  const out = { type: node.type, name: node.name };
+  const defaults = NODE_TYPES[node.type] || {};
+  for (const key of Object.keys(node)) {
+    if (key.startsWith('_') || ['id', 'type', 'name', 'is3D', 'children', 'parent', 'script', 'visible'].includes(key)) continue;
+    if (typeof node[key] === 'function') continue;
+    const v = node[key];
+    if (Array.isArray(v) ? JSON.stringify(v) !== JSON.stringify(defaults[key]) : v !== defaults[key]) out[key] = v;
+  }
+  if (node.script) out.script = node.script;
+  if (node.visible === false) out.visible = false;
+  if (node.children.length) out.children = node.children.map(serialize);
+  return out;
+}
+
+function treeHas3D(node) {
+  if (node.is3D || IS_3D.has(node.type)) return true;
+  return (node.children || []).some(treeHas3D);
+}
+
+function treeHasPhysics3D(node) {
+  if (node.body3d === 'dynamic' || node.body3d === 'static') return true;
+  return (node.children || []).some(treeHasPhysics3D);
+}
+
+// Evaluate an animation clip at time t, writing values onto nodes.
+// def: { duration, loop, tracks: [{ node, prop, keys: [{ t, v, ease }] }] }
+// findNode: name -> node (or null). Shared by the runtime and the editor.
+function sampleAnim(def, t, findNode) {
+  for (const track of def.tracks || []) {
+    const node = findNode(track.node);
+    const keys = track.keys;
+    if (!node || !keys?.length) continue;
+    let value;
+    if (t <= keys[0].t) value = keys[0].v;
+    else if (t >= keys[keys.length - 1].t) value = keys[keys.length - 1].v;
+    else {
+      let i = 0;
+      while (i < keys.length - 1 && keys[i + 1].t < t) i++;
+      const a = keys[i], b = keys[i + 1];
+      const span = b.t - a.t || 1e-6;
+      const k = (Easing[b.ease] || Easing.linear)((t - a.t) / span);
+      value = a.v + (b.v - a.v) * k;
+    }
+    node[track.prop] = value;
+  }
+}
+
+function compileScript(name, src) {
+  const body = `"use strict";
+${src}
+;return {
+  ready: typeof ready === 'function' ? ready : null,
+  update: typeof update === 'function' ? update : null,
+  onPress: typeof onPress === 'function' ? onPress : null,
+  onInput: typeof onInput === 'function' ? onInput : null,
+  onSignal: typeof onSignal === 'function' ? onSignal : null,
+  onCollide: typeof onCollide === 'function' ? onCollide : null,
+  onChange: typeof onChange === 'function' ? onChange : null,
+  onSubmit: typeof onSubmit === 'function' ? onSubmit : null,
+};`;
+  try {
+    return new Function('self', 'game', body);
+  } catch (e) {
+    console.error(`[neku] script "${name}" failed to compile: ${e.message}`);
+    return null;
+  }
+}
+
+class Game {
+  constructor(project, container) {
+    this.project = project;
+    this.container = container;
+    const s = project.settings || {};
+    this.width = s.width || 480;
+    this.height = s.height || 720;
+    this.background = s.background || '#111';
+    this.pixelated = !!s.pixelated;
+    this.uiMode = s.uiMode || 'overlay'; // 'overlay' | 'screen3d'
+    this.fx = s.fx || null;
+    this.time = 0;
+    this.audio = new AudioEngine();
+    this.physics = new Physics2D(s.physics || {});
+    this.anims = project.anims || {};
+    this._activeAnims = [];
+    this._tweens = [];
+    this._timers = [];
+    this._signals = new Map();
+    this._running = false;
+    this._focusInput = null; // focused TextInput node
+    this.gl3d = null; // set async when the scene uses 3D
+
+    container.innerHTML = '';
+    container.style.position = 'relative';
+    container.style.background = this.background;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.dpr = dpr;
+    const mk = (backing = true) => {
+      const c = document.createElement('canvas');
+      if (backing) { c.width = this.width * dpr; c.height = this.height * dpr; }
+      Object.assign(c.style, { position: 'absolute', inset: '0', width: '100%', height: '100%' });
+      if (this.pixelated) c.style.imageRendering = 'pixelated';
+      container.appendChild(c);
+      return c;
+    };
+    this.glCanvas = mk(false); // Three.js manages its own backing size
+    this.canvas2d = mk();
+    this.ctx = this.canvas2d.getContext('2d');
+    if (this.pixelated) this.ctx.imageSmoothingEnabled = false;
+    if (this.fx?.crt) {
+      this.fxCanvas = mk();
+      this.screenFx = new ScreenFX(this.fxCanvas);
+      this.glCanvas.style.visibility = 'hidden';
+      this.canvas2d.style.visibility = 'hidden';
+    }
+    if (this.uiMode === 'screen3d') this.canvas2d.style.visibility = 'hidden';
+    this._blank = document.createElement('canvas');
+    this._blank.width = this._blank.height = 1;
+
+    // Input listens on the topmost visible canvas.
+    this.inputSurface = this.fxCanvas || this.canvas2d;
+    this.input = new Input(this.inputSurface, this.width, this.height);
+    this.input.beforeKey = (e) => {
+      if (this._focusInput && ['Backspace', ' ', 'Tab', 'ArrowUp', 'ArrowDown'].includes(e.key)) e.preventDefault();
+    };
+
+    // Assets: data URLs. Images get an <img> for the 2D renderer; every
+    // asset keeps its URL for Three loaders (textures, GLTF) and audio.
+    this.assets = { images: {}, urls: {} };
+    for (const [name, url] of Object.entries(project.assets || {})) {
+      this.assets.urls[name] = url;
+      if (url.startsWith('data:image') || /\.(png|jpe?g|webp|gif)$/i.test(name)) {
+        const img = new Image();
+        img.src = url;
+        this.assets.images[name] = img;
+      }
+    }
+
+    this._compiledScripts = {};
+    for (const [name, src] of Object.entries(project.scripts || {})) {
+      this._compiledScripts[name] = compileScript(name, src);
+    }
+
+    this.gotoScene(project.mainScene || project.scenes?.[0]?.name);
+  }
+
+  async _ensure3D() {
+    if (this.gl3d || this._loading3d) return;
+    this._loading3d = true;
+    try {
+      const { Render3D, THREE } = await import('./render3d.js');
+      this.gl3d = new Render3D(this.glCanvas, { pixelated: this.pixelated });
+      this.THREE = THREE; // escape hatch for advanced scripts
+    } catch (e) {
+      console.error('[neku] 3D failed to load: ' + e.message);
+    }
+  }
+
+  async _ensurePhysics3D() {
+    if (this.physics3d || this._loadingP3d) return;
+    this._loadingP3d = true;
+    try {
+      const { Physics3D } = await import('./physics3d.js');
+      this.physics3d = new Physics3D(this.project.settings?.physics || {});
+    } catch (e) {
+      console.error('[neku] 3D physics failed to load: ' + e.message);
+    }
+  }
+
+  gotoScene(name) {
+    const def = (this.project.scenes || []).find((sc) => sc.name === name);
+    if (!def) {
+      console.error(`[neku] scene not found: "${name}"`);
+      return;
+    }
+    this.sceneName = name;
+    this.root = hydrate(def.root);
+    if (treeHas3D(this.root)) this._ensure3D();
+    if (treeHasPhysics3D(this.root)) this._ensurePhysics3D();
+    this._tweens = [];
+    this._timers = [];
+    this._pendingReady = [];
+    this._bindScripts(this.root);
+    for (const fn of this._pendingReady) this._safely(fn);
+    this._pendingReady = null;
+  }
+
+  _bindScripts(node) {
+    if (node.script && this._compiledScripts[node.script]) {
+      try {
+        node._hooks = this._compiledScripts[node.script](node, this);
+      } catch (e) {
+        console.error(`[neku] script "${node.script}" threw during setup: ${e.message}`);
+        node._hooks = null;
+      }
+      if (node._hooks?.ready) {
+        const fn = () => node._hooks.ready();
+        if (this._pendingReady) this._pendingReady.push(fn);
+        else this._safely(fn);
+      }
+    }
+    for (const c of node.children) this._bindScripts(c);
+  }
+
+  _safely(fn) {
+    try {
+      fn();
+    } catch (e) {
+      console.error('[neku] script error: ' + (e.stack || e.message));
+    }
+  }
+
+  // --- Script-facing API ---
+
+  find(name) {
+    return this.root.name === name ? this.root : this.root.find(name);
+  }
+
+  spawn(parent, type, props = {}) {
+    const p = typeof parent === 'string' ? this.find(parent) : parent || this.root;
+    const node = new GameNode(type, props);
+    p.addChild(node);
+    if (node.is3D) this._ensure3D();
+    if (node.body3d === 'dynamic' || node.body3d === 'static') this._ensurePhysics3D();
+    if (props.script) {
+      this._pendingReady = null;
+      this._bindScripts(node);
+    }
+    return node;
+  }
+
+  tween(target, to, { duration = 0.4, easing = 'quadOut', delay = 0, onDone = null } = {}) {
+    const tw = { target, to, from: {}, t: -delay, duration, ease: Easing[easing] || Easing.quadOut, onDone, done: false };
+    for (const k of Object.keys(to)) tw.from[k] = target[k] ?? 0;
+    this._tweens.push(tw);
+    return tw;
+  }
+
+  after(seconds, fn) {
+    const t = { at: this.time + seconds, fn, repeat: 0 };
+    this._timers.push(t);
+    return () => (t.dead = true);
+  }
+
+  every(seconds, fn) {
+    const t = { at: this.time + seconds, fn, repeat: seconds };
+    this._timers.push(t);
+    return () => (t.dead = true);
+  }
+
+  emit(name, data) {
+    const walk = (n) => {
+      if (n._hooks?.onSignal) this._safely(() => n._hooks.onSignal(name, data));
+      for (const c of n.children) walk(c);
+    };
+    walk(this.root);
+    for (const fn of this._signals.get(name) || []) this._safely(() => fn(data));
+  }
+
+  on(name, fn) {
+    if (!this._signals.has(name)) this._signals.set(name, []);
+    this._signals.get(name).push(fn);
+  }
+
+  // --- Debugging ---
+
+  watch(name, value) {
+    (this._watches ||= new Map()).set(name, value);
+  }
+
+  pause() { this._paused = true; }
+  resume() { this._paused = false; }
+  stepOnce() { this._step = true; }
+
+  // Keyframe animation clips (authored in the Studio's Timeline panel).
+  playAnim(name, { loop = null, onDone = null } = {}) {
+    const def = this.anims[name];
+    if (!def) {
+      console.warn(`[neku] unknown animation: "${name}"`);
+      return;
+    }
+    this.stopAnim(name);
+    this._activeAnims.push({ name, def, t: 0, loop: loop ?? !!def.loop, onDone });
+  }
+
+  stopAnim(name) {
+    this._activeAnims = this._activeAnims.filter((a) => a.name !== name);
+  }
+
+  rand = rand;
+  randInt = randInt;
+  pick = pick;
+  clamp = clamp;
+  lerp = lerp;
+
+  // --- Loop ---
+
+  start() {
+    this._running = true;
+    let last = performance.now();
+    const frame = (now) => {
+      if (!this._running) return;
+      const dt = Math.min((now - last) / 1000, 0.05);
+      last = now;
+      this.fps = Math.round((this.fps || 60) * 0.9 + (1 / Math.max(dt, 1e-4)) * 0.1);
+      try {
+        if (!this._paused || this._step) {
+          this._step = false;
+          this.time += dt;
+          this._update(dt);
+        }
+        this._render();
+      } catch (e) {
+        console.error('[neku] frame error: ' + (e.stack || e.message));
+      }
+      this.input.endFrame();
+      this._raf = requestAnimationFrame(frame);
+    };
+    this._raf = requestAnimationFrame(frame);
+  }
+
+  stop() {
+    this._running = false;
+    cancelAnimationFrame(this._raf);
+    this.input.destroy();
+    this.gl3d?.dispose();
+  }
+
+  _update(dt) {
+    for (const e of this.input.drainEvents()) {
+      if (e.type === 'pointerdown' || e.type === 'pointermove' || e.type === 'pointerup') {
+        this._pointer(e);
+      }
+      if (e.type === 'keydown' && this._focusInput) this._typeInto(this._focusInput, e.key);
+      const walk = (n) => {
+        if (n._hooks?.onInput) this._safely(() => n._hooks.onInput(e));
+        for (const c of n.children) walk(c);
+      };
+      walk(this.root);
+    }
+
+    // Keyframe animations (before scripts so update() sees final values).
+    for (const a of this._activeAnims) {
+      a.t += dt;
+      const dur = a.def.duration || 1;
+      if (a.t >= dur) {
+        if (a.loop) a.t %= dur;
+        else {
+          a.t = dur;
+          a.done = true;
+        }
+      }
+      sampleAnim(a.def, a.t, (name) => this.find(name));
+      if (a.done && a.onDone) this._safely(a.onDone);
+    }
+    this._activeAnims = this._activeAnims.filter((a) => !a.done);
+
+    for (const t of this._timers) {
+      if (t.dead) continue;
+      if (this.time >= t.at) {
+        this._safely(t.fn);
+        if (t.repeat) t.at += t.repeat;
+        else t.dead = true;
+      }
+    }
+    this._timers = this._timers.filter((t) => !t.dead);
+
+    for (const tw of this._tweens) {
+      tw.t += dt;
+      if (tw.t < 0) continue;
+      const k = tw.duration <= 0 ? 1 : Math.min(tw.t / tw.duration, 1);
+      const e = tw.ease(k);
+      for (const key of Object.keys(tw.to)) tw.target[key] = tw.from[key] + (tw.to[key] - tw.from[key]) * e;
+      if (k >= 1) {
+        tw.done = true;
+        if (tw.onDone) this._safely(tw.onDone);
+      }
+    }
+    this._tweens = this._tweens.filter((t) => !t.done);
+
+    // Physics: dynamic bodies + collision signals.
+    this.physics.step(this.root, dt, (a, b, side) => {
+      if (a._hooks?.onCollide) this._safely(() => a._hooks.onCollide(b, side));
+      if (b?._hooks?.onCollide) this._safely(() => b._hooks.onCollide(a, side === 'overlap' ? 'overlap' : opposite(side)));
+    });
+    if (this.physics3d) {
+      this.physics3d.step(this.root, dt, (a, b, side) => {
+        if (a._hooks?.onCollide) this._safely(() => a._hooks.onCollide(b, side));
+        if (b?._hooks?.onCollide) this._safely(() => b._hooks.onCollide(a, side));
+      });
+    }
+
+    // Scripts, sprite animation, particles.
+    const walk = (n) => {
+      if (n._dead) return;
+      if (n.type === 'Sprite' && n.playing && (n.sheetCols > 1 || n.sheetRows > 1)) {
+        n.frame = (n.frame + (n.fps || 8) * dt) % (n.sheetCols * n.sheetRows);
+      }
+      if (n._hooks?.update) this._safely(() => n._hooks.update(dt));
+      if (n._particles) {
+        for (const p of n._particles) {
+          p.life -= dt;
+          p.vy += (n.gravity ?? 600) * dt;
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+        }
+        n._particles = n._particles.filter((p) => p.life > 0);
+      }
+      for (const c of [...n.children]) walk(c);
+    };
+    walk(this.root);
+  }
+
+  _pointer(e) {
+    // 3D picking: clickable meshes + Screen3D UIs.
+    if (this.gl3d) {
+      const hit = this.gl3d.pick(e.x / this.width, e.y / this.height);
+      if (hit) {
+        if (hit.node.type === 'Screen3D' && hit.uv) {
+          // Forward the hit into 2D UI space via the surface's UV coords.
+          this._pointer2D({ type: e.type, x: hit.uv.x * this.width, y: (1 - hit.uv.y) * this.height });
+          return;
+        }
+        if (e.type === 'pointerup') {
+          if (hit.node._hooks?.onPress) this._safely(() => hit.node._hooks.onPress());
+          this.emit('press3d', hit.node.name);
+        }
+      }
+    }
+    // Overlay 2D UI gets the raw pointer; in screen3d mode the 2D UI only
+    // exists on 3D surfaces, so raw pointer events don't reach it directly.
+    if (this.uiMode !== 'screen3d') this._pointer2D(e);
+  }
+
+  _typeInto(node, key) {
+    const prev = node.text;
+    if (key === 'Backspace') node.text = node.text.slice(0, -1);
+    else if (key === 'Enter') {
+      if (node._hooks?.onSubmit) this._safely(() => node._hooks.onSubmit());
+      this.emit('submit', { name: node.name, text: node.text });
+      return;
+    } else if (key === 'Escape') {
+      this._focusInput._focused = false;
+      this._focusInput = null;
+      return;
+    } else if (key.length === 1 && node.text.length < (node.maxLength ?? 64)) {
+      node.text += key;
+    } else return;
+    if (node.text !== prev) {
+      if (node._hooks?.onChange) this._safely(() => node._hooks.onChange());
+      this.emit('change', { name: node.name, text: node.text });
+    }
+  }
+
+  _pointer2D(e) {
+    let target = null;
+    let inputTarget = null;
+    const walk = (n) => {
+      if (n.visible === false) return;
+      if (n.type === 'Button' && (n.opacity ?? 1) > 0 && hitTest(n, e.x, e.y)) target = n;
+      if (n.type === 'TextInput' && (n.opacity ?? 1) > 0 && hitTest(n, e.x, e.y)) inputTarget = n;
+      for (const c of n.children) walk(c);
+    };
+    walk(this.root);
+
+    if (e.type === 'pointerdown') {
+      if (this._focusInput && this._focusInput !== inputTarget) this._focusInput._focused = false;
+      this._focusInput = inputTarget;
+      if (inputTarget) inputTarget._focused = true;
+    }
+
+    const clearHover = (n) => {
+      if (n.type === 'Button') n._hover = false;
+      for (const c of n.children) clearHover(c);
+    };
+
+    if (e.type === 'pointermove') {
+      clearHover(this.root);
+      if (target) target._hover = true;
+    } else if (e.type === 'pointerdown') {
+      if (target) {
+        target._pressed = true;
+        this._pressTarget = target;
+      }
+    } else if (e.type === 'pointerup') {
+      const pt = this._pressTarget;
+      if (pt) {
+        pt._pressed = false;
+        if (pt === target) {
+          this.audio.play(pt.sound || 'click');
+          if (pt._hooks?.onPress) this._safely(() => pt._hooks.onPress());
+          this.emit('button', pt.name);
+        }
+      }
+      this._pressTarget = null;
+    }
+  }
+
+  _render() {
+    // 2D first so Screen3D's CanvasTexture picks up this frame's UI.
+    render2D(this.ctx, this.root, this.assets, this.width, this.height, null, this.dpr);
+    if (this.gl3d) this.gl3d.render(this.root, this.assets, this.width, this.height, this.canvas2d);
+    if (this.screenFx) {
+      this.screenFx.render(
+        this.gl3d ? this.glCanvas : null,
+        this.uiMode === 'screen3d' ? this._blank : this.canvas2d,
+        this.time,
+        this.fx,
+        this.width * this.dpr,
+        this.height * this.dpr
+      );
+    }
+  }
+}
+
+function opposite(side) {
+  return { top: 'bottom', bottom: 'top', left: 'right', right: 'left' }[side] || side;
+}
+
+function startGame(project, container) {
+  const game = new Game(project, container);
+  game.start();
+  return game;
+}
+
+// ---- game ----
+const PROJECT = {"name":"Neku Breakout","engine":"neku-0.2","settings":{"width":480,"height":640,"background":"#12152b","pixelated":true,"physics":{"gravity":0}},"mainScene":"Main","scenes":[{"name":"Main","root":{"type":"Node","name":"Main","script":"Breakout.js","children":[{"type":"Rect","name":"WallL","x":-12,"y":320,"w":24,"h":1280,"color":"#232842","body":"static"},{"type":"Rect","name":"WallR","x":492,"y":320,"w":24,"h":1280,"color":"#232842","body":"static"},{"type":"Rect","name":"WallT","x":240,"y":-12,"w":960,"h":24,"color":"#232842","body":"static"},{"type":"Rect","name":"Paddle","x":240,"y":596,"w":92,"h":14,"color":"#29e6c4","radius":7,"body":"static"},{"type":"Circle","name":"Ball","x":240,"y":560,"radius":8,"color":"#ffd700","body":"dynamic","gravityScale":0,"bounce":1,"script":"Ball.js"},{"type":"Label","name":"Score","x":14,"y":24,"text":"SCORE 0","size":18,"bold":true,"color":"#29e6c4","align":"left","font":"monospace"},{"type":"Label","name":"Lives","x":466,"y":24,"text":"♥♥♥","size":18,"color":"#ff5c9e","align":"right"},{"type":"Label","name":"Msg","x":240,"y":380,"text":"CLICK TO SERVE","size":24,"bold":true,"color":"#f5f0ff","font":"monospace"},{"type":"Particles","name":"Chips","x":0,"y":0,"gravity":500}]}}],"scripts":{"Breakout.js":"// NEKU BREAKOUT — bricks are spawned from code, so restart is one call.\nconst COLORS = ['#ff5c9e', '#ffcb47', '#29e6c4', '#4ade80', '#5fa8e0'];\nlet score = 0, lives = 3, bricksLeft = 0, playing = false, over = false;\n\nfunction ready() {\n  buildBricks();\n  game.on('brick', (brick) => {\n    score += 10;\n    bricksLeft--;\n    game.find('Score').text = 'SCORE ' + score;\n    const p = game.find('Chips');\n    p.x = brick.x; p.y = brick.y;\n    p.burst(12, { colors: [brick.color], up: -60, life: 0.8, maxSpeed: 260 });\n    game.audio.play(bricksLeft % 5 === 0 ? 'coin' : 'tick');\n    if (bricksLeft <= 0) win();\n  });\n  game.on('ball-lost', () => {\n    lives--;\n    game.find('Lives').text = '♥'.repeat(Math.max(0, lives));\n    game.audio.play('lose');\n    if (lives <= 0) gameOver();\n    else { playing = false; say('CLICK TO SERVE'); resetBall(); }\n  });\n}\n\nfunction buildBricks() {\n  bricksLeft = 0;\n  for (let r = 0; r < 5; r++) {\n    for (let c = 0; c < 8; c++) {\n      game.spawn('Main', 'Rect', {\n        name: 'Brick_' + r + '_' + c,\n        x: 44 + c * 56, y: 70 + r * 26,\n        w: 48, h: 18, radius: 3,\n        color: COLORS[r], body: 'static',\n      });\n      bricksLeft++;\n    }\n  }\n}\n\nfunction say(msg) { const m = game.find('Msg'); m.text = msg; m.visible = true; }\n\nfunction resetBall() {\n  const b = game.find('Ball');\n  b.x = game.find('Paddle').x; b.y = 560; b.vx = 0; b.vy = 0;\n}\n\nfunction onInput(e) {\n  if (e.type === 'pointermove') {\n    const p = game.find('Paddle');\n    p.x = game.clamp(e.x, p.w / 2, 480 - p.w / 2);\n    if (!playing && !over) game.find('Ball').x = p.x;\n  }\n  if (e.type === 'pointerdown') {\n    if (over) { restart(); return; }\n    if (!playing) {\n      playing = true;\n      game.find('Msg').visible = false;\n      const b = game.find('Ball');\n      b.vx = game.rand(-120, 120); b.vy = -400;\n      game.audio.play('pop');\n    }\n  }\n}\n\nfunction update() {\n  const b = game.find('Ball');\n  if (playing && b.y > 640 + 30) game.emit('ball-lost');\n}\n\nfunction win() { over = true; playing = false; say('YOU WIN! CLICK TO RESTART'); game.audio.play('jackpot'); }\nfunction gameOver() { over = true; playing = false; say('GAME OVER — CLICK TO RESTART'); }\n\nfunction restart() {\n  for (let r = 0; r < 5; r++) for (let c = 0; c < 8; c++) game.find('Brick_' + r + '_' + c)?.destroy();\n  score = 0; lives = 3; over = false; playing = false;\n  game.find('Score').text = 'SCORE 0';\n  game.find('Lives').text = '♥♥♥';\n  say('CLICK TO SERVE');\n  resetBall();\n  buildBricks();\n}","Ball.js":"// Keeps speed constant and converts paddle/brick hits into gameplay.\nconst SPEED = 430;\n\nfunction update(dt) {\n  const len = Math.hypot(self.vx || 0, self.vy || 0);\n  if (len > 1) {\n    // steady arcade speed + never perfectly horizontal\n    self.vx = (self.vx / len) * SPEED;\n    self.vy = (self.vy / len) * SPEED;\n    if (Math.abs(self.vy) < 60) self.vy = (self.vy < 0 ? -1 : 1) * 60;\n  }\n}\n\nfunction onCollide(other, side) {\n  if (!other) return;\n  if (other.name === 'Paddle') {\n    // hit position controls the return angle\n    self.vx = (self.x - other.x) * 7;\n    self.vy = -Math.abs(self.vy);\n    game.audio.play('pop');\n  } else if (other.name.startsWith('Brick_')) {\n    other.destroy();\n    game.emit('brick', other);\n  } else {\n    game.audio.play('tick');\n  }\n}"},"assets":{},"anims":{},"prefabs":{}};
+const mount = document.getElementById('game');
+const S = PROJECT.settings || {};
+function fit() {
+  const w = S.width || 480, h = S.height || 720;
+  const scale = Math.min(innerWidth / w, innerHeight / h, 1.5) * 0.96;
+  mount.style.width = w * scale + 'px';
+  mount.style.height = h * scale + 'px';
+}
+fit();
+addEventListener('resize', fit);
+window.game = startGame(PROJECT, mount); // console access for debugging
+</script>
+</body>
+</html>
