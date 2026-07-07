@@ -5,7 +5,7 @@ games and apps, publishable to itch.io / GitHub Pages, with desktop Studio
 builds for macOS / Windows / Linux.
 
 ## A. Branding & mascot
-- [x] A1 cwat pixel-art mascot (from deviverr/cwat, the `>w<` cat): SVG for UI + PNG icons (zero-dep PNG encoder in tools/gen-mascot.js)
+- [x] A1 cwat pixel-art mascot (decoded from assets/cwat-ascii.txt, the attached `>w<` block art): SVG for UI + PNG icons (zero-dep PNG encoder in tools/gen-mascot.js)
 - [x] A2 Mascot everywhere: Studio logo, main menu, empty states, favicon, desktop app icon, README
 
 ## B. Studio shell
@@ -46,5 +46,6 @@ builds for macOS / Windows / Linux.
 - [x] G3 docs/PUBLISHING.md — itch.io + GitHub Pages for games; putting Neku Studio itself on itch.io
 - [x] G4 GitHub Release v1.0.0: desktop zips + sample game exports attached
 - [x] G5 Full browser + desktop verification pass
+- [x] G6 GitHub Pages hosted Studio + v1.0.1 rebuild with mascot decoded from the attached ASCII art
 
 Execution order: A → F (testers get builds even if time runs short) → B → C → D → E → G.

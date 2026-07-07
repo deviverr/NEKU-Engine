@@ -8,7 +8,7 @@
 // nothing users run has npm dependencies.
 
 import { execSync } from 'node:child_process';
-import { cpSync, rmSync, mkdirSync, existsSync, writeFileSync, chmodSync, copyFileSync } from 'node:fs';
+import { cpSync, rmSync, mkdirSync, existsSync, writeFileSync, chmodSync, copyFileSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
@@ -17,6 +17,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const desk = join(root, 'desktop');
 const res = join(desk, 'resources');
 const out = join(root, 'dist', 'desktop');
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const version = pkg.version || '1.0.0';
 const run = (cmd, cwd = desk) => execSync(cmd, { cwd, stdio: 'inherit' });
 
 console.log('— staging resources');
@@ -54,8 +56,8 @@ writeFileSync(join(app, 'Contents', 'Info.plist'), `<?xml version="1.0" encoding
   <key>CFBundleName</key><string>Neku Studio</string>
   <key>CFBundleDisplayName</key><string>Neku Studio</string>
   <key>CFBundleIdentifier</key><string>dev.deviverr.neku</string>
-  <key>CFBundleVersion</key><string>1.0.0</string>
-  <key>CFBundleShortVersionString</key><string>1.0.0</string>
+  <key>CFBundleVersion</key><string>${version}</string>
+  <key>CFBundleShortVersionString</key><string>${version}</string>
   <key>CFBundleExecutable</key><string>neku-studio</string>
   <key>CFBundleIconFile</key><string>cwat.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>

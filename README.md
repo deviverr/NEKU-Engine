@@ -9,6 +9,7 @@ live team co-op, CRT effects, and single-file exports. Mascot: **cwat** `>w<`.
   Three.js embedded). Upload straight to **itch.io** or GitHub Pages.
 - **Neku Studio** runs in any browser *and* as a **1–2 MB native app** for
   macOS / Windows / Linux (grab it from [Releases](https://github.com/deviverr/NEKU-Engine/releases)).
+- Hosted browser Studio: [deviverr.github.io/NEKU-Engine/editor/](https://deviverr.github.io/NEKU-Engine/editor/).
 - Runtime dependencies: **zero**. Three.js, cannon-es and CodeMirror are vendored,
   pinned files — `npm install` is never required to use, edit, or ship a game.
 

@@ -1,66 +1,78 @@
 #!/usr/bin/env node
-// Generates the cwat mascot (the >w< cat from deviverr/cwat) as:
-//   editor/cwat.svg            — crisp at any size, used across the Studio UI
-//   desktop/icons/icon-*.png   — app icons (zero-dep PNG encoder, node:zlib)
+// Generates the cwat mascot — decoded straight from assets/cwat-ascii.txt.
+// Each half-block char (▄ ▀ █) is one column × two pixel rows, so the mascot
+// is the attached ASCII art rather than a redrawn approximation.
 //
-// The cat is authored as a 16×16 pixel map below — edit it like text art.
+//   editor/cwat.svg            — UI mascot (transparent, crisp at any size)
+//   desktop/icons/icon-*.png   — app icons (zero-dep PNG encoder, node:zlib)
 
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-// ---- the cwat ------------------------------------------------------------
-// . transparent · O outline · F fur · P pink (inner ear) · E eyes/mouth · L light muzzle
+// ---- the official cwat (face #1 of cwat-ascii.txt) ------------------------
 
-const PIXELS = [
-  '..O..........O..',
-  '.OFO........OFO.',
-  '.OFPO......OPFO.',
-  '.OFFOOOOOOOOFFO.',
-  '.OFFFFFFFFFFFFO.',
-  '.OFFFFFFFFFFFFO.',
-  '.OFEFFFFFFFFEFO.',
-  '.OFFEFFFFFFEFFO.',
-  '.OFEFFFFFFFFEFO.',
-  '.OPFFFEFEFEFFPO.',
-  '.OFFFFFEFEFFFFO.',
-  '.OFFFFFFFFFFFFO.',
-  '..OFFFFFFFFFFO..',
-  '...OOOOOOOOOO...',
-  '................',
-  '................',
-];
+const SOURCE = readFileSync(join(root, 'assets', 'cwat-ascii.txt'), 'utf8')
+  .replace(/\r/g, '')
+  .split('\n');
 
-const COLORS = {
-  O: [26, 16, 35, 255],     // outline #1a1023
-  F: [142, 108, 242, 255],  // fur #8e6cf2
-  P: [255, 92, 158, 255],   // pink #ff5c9e
-  E: [26, 16, 35, 255],     // eyes/mouth
-  L: [230, 225, 245, 255],  // muzzle #e6e1f5
-  '.': [0, 0, 0, 0],
-};
+const ASCII = SOURCE
+  .filter((line) => /[▄▀█]/.test(line))
+  .slice(0, 5)
+  .map((line) => line.slice(0, 15).trimEnd());
 
-const SIZE = 16;
+// Half-block chars -> [top pixel, bottom pixel]
+const HALF = { '▄': [0, 1], '▀': [1, 0], '█': [1, 1], ' ': [0, 0] };
 
-// ---- SVG -------------------------------------------------------------------
+function decode(lines) {
+  const w = Math.max(...lines.map((l) => [...l].length));
+  const grid = []; // rows of 0/1
+  for (const line of lines) {
+    const top = [], bot = [];
+    for (let x = 0; x < w; x++) {
+      const [t, b] = HALF[[...line][x] || ' '] || [0, 0];
+      top.push(t);
+      bot.push(b);
+    }
+    grid.push(top, bot);
+  }
+  return grid; // w × lines.length*2
+}
+
+const FACE = decode(ASCII); // 15 × 10
+const FW = FACE[0].length, FH = FACE.length;
+
+// Canvas: 16×16 with the face centered.
+const SIZE = 16, OX = Math.floor((SIZE - FW) / 2), OY = 3;
+const NOSE = { x: 7, y: 7 };
+
+const INK = [142, 108, 242, 255];   // lavender #8e6cf2
+const PINK = [255, 92, 158, 255];   // nose #ff5c9e
+const BG = [26, 16, 35, 255];       // icon plate #1a1023
+
+function pixelAt(x, y) {
+  const fx = x - OX, fy = y - OY;
+  if (fx < 0 || fy < 0 || fx >= FW || fy >= FH || !FACE[fy][fx]) return null;
+  return fx === NOSE.x && fy === NOSE.y ? PINK : INK;
+}
+
+// ---- SVG (transparent background, for the Studio UI) ----------------------
 
 function toSvg() {
   const hex = (c) => '#' + c.slice(0, 3).map((v) => v.toString(16).padStart(2, '0')).join('');
   let rects = '';
-  for (let y = 0; y < SIZE; y++) {
+  for (let y = 0; y < SIZE; y++)
     for (let x = 0; x < SIZE; x++) {
-      const ch = PIXELS[y][x];
-      if (ch === '.') continue;
-      rects += `<rect x="${x}" y="${y}" width="1" height="1" fill="${hex(COLORS[ch])}"/>`;
+      const c = pixelAt(x, y);
+      if (c) rects += `<rect x="${x}" y="${y}" width="1" height="1" fill="${hex(c)}"/>`;
     }
-  }
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">${rects}</svg>\n`;
 }
 
-// ---- PNG (RGBA8, zero deps) -----------------------------------------------
+// ---- PNG icons (dark rounded plate so they read on any wallpaper) ---------
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -87,22 +99,30 @@ function chunk(type, data) {
   return Buffer.concat([len, body, crc]);
 }
 
-function toPng(scale) {
+// Pixel-rounded plate: skip 2px corners at 16×16 scale.
+function plateAt(x, y) {
+  const d = (a, b) => Math.min(a, b);
+  const cx = d(x, SIZE - 1 - x), cy = d(y, SIZE - 1 - y);
+  return !(cx === 0 && cy < 2) && !(cy === 0 && cx < 2) && !(cx === 1 && cy === 0) && !(cx === 0 && cy === 1) ? BG : null;
+}
+
+function toPng(scale, withPlate) {
   const w = SIZE * scale, h = SIZE * scale;
   const raw = Buffer.alloc(h * (1 + w * 4));
   for (let y = 0; y < h; y++) {
     const row = y * (1 + w * 4);
-    raw[row] = 0; // filter: none
+    raw[row] = 0;
     for (let x = 0; x < w; x++) {
-      const c = COLORS[PIXELS[(y / scale) | 0][(x / scale) | 0]];
+      const gx = (x / scale) | 0, gy = (y / scale) | 0;
+      const c = pixelAt(gx, gy) || (withPlate ? plateAt(gx, gy) : null) || [0, 0, 0, 0];
       c.forEach((v, i) => (raw[row + 1 + x * 4 + i] = v));
     }
   }
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(w, 0);
   ihdr.writeUInt32BE(h, 4);
-  ihdr[8] = 8;  // bit depth
-  ihdr[9] = 6;  // RGBA
+  ihdr[8] = 8;
+  ihdr[9] = 6;
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk('IHDR', ihdr),
@@ -116,7 +136,6 @@ function toPng(scale) {
 writeFileSync(join(root, 'editor', 'cwat.svg'), toSvg());
 mkdirSync(join(root, 'desktop', 'icons'), { recursive: true });
 for (const scale of [1, 2, 4, 8, 16, 32, 64]) {
-  const px = SIZE * scale;
-  writeFileSync(join(root, 'desktop', 'icons', `icon-${px}.png`), toPng(scale));
+  writeFileSync(join(root, 'desktop', 'icons', `icon-${SIZE * scale}.png`), toPng(scale, true));
 }
-console.log('wrote editor/cwat.svg + desktop/icons/icon-{16..1024}.png  >w<');
+console.log('wrote editor/cwat.svg + desktop/icons/icon-{16..1024}.png — the real cwat >w<');

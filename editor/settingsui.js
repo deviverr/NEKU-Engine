@@ -33,7 +33,7 @@ export function openSettings(winman, ed, ctx) {
         </div>
         <div class="set-section">PROJECT METADATA</div>
         <div class="prop-row"><label>author</label><input class="set-author" type="text" value="${meta.author || ''}" /></div>
-        <div class="prop-row"><label>version</label><input class="set-version" type="text" value="${meta.version || '1.0.0'}" /></div>
+        <div class="prop-row"><label>version</label><input class="set-version" type="text" value="${meta.version || '1.0.1'}" /></div>
         <div class="prop-row"><label>description</label><input class="set-desc" type="text" value="${meta.description || ''}" /></div>
         <div class="set-help">Included as meta tags in exports. Name an asset "icon.png" for a favicon.</div>
         <div class="set-section">EXTENSIONS (.nkx)</div>

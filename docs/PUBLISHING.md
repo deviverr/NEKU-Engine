@@ -32,8 +32,10 @@ at the file) for ~3–8 MB installers, or reuse Neku's own Neutralino setup: cop
 2. itch.io → Upload new project → **Kind of project: Downloadable**.
 3. Upload all three zips; label each with its platform checkbox (Windows/Mac/Linux).
 4. Classification: **Tools**. Suggested tags: `game-engine`, `2d`, `3d`, `pixel-art`.
-5. Optional web version: the Studio also runs hosted — put the whole repo on GitHub
-   Pages and link `…/editor/` as “Use in browser”.
+5. Optional web version: `npm run pages`, deploy `dist/pages` to a `gh-pages`
+   branch, and link `…/editor/` as “Use in browser”.
+
+Current hosted Studio: https://deviverr.github.io/NEKU-Engine/editor/
 
 Tester notes to include on the page:
 - macOS: unsigned build — right-click → Open on first launch.
@@ -45,5 +47,6 @@ Tester notes to include on the page:
 ```bash
 npm run samples && npm run export     # refresh sample exports
 npm run desktop                        # rebuild the three Studio zips
+npm run pages                          # refresh GitHub Pages payload
 gh release create v1.x.x dist/desktop/*.zip dist/*.html --title "Neku v1.x.x" --notes "…"
 ```
