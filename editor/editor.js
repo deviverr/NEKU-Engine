@@ -9,6 +9,9 @@ import { Viewport3D } from './viewport3d.js';
 import { CollabClient } from './collab.js';
 import { TimelinePanel } from './timeline.js';
 import { buildZip } from '../engine/bundler.js';
+import { initNative } from './native.js';
+
+let native = null; // desktop bridge (Neutralino) or null in the browser
 
 const $ = (id) => document.getElementById(id);
 
@@ -94,6 +97,7 @@ function loadProjectJson(json, { keepSelection = false } = {}) {
   ed.sel = selName ? ed.scene().root.find(selName) : null;
   if (!Object.keys(ed.project.scripts).includes(currentScript)) currentScript = Object.keys(ed.project.scripts)[0] || null;
   $('projectName').value = ed.project.name;
+  native?.setTitle(ed.project.name);
   lastSnapshot = JSON.stringify(serializeProject());
   refreshAll();
 }
@@ -820,7 +824,20 @@ $('btnSample').addEventListener('click', () =>
   ])
 );
 
-$('btnOpen').addEventListener('click', () => $('fileInput').click());
+$('btnOpen').addEventListener('click', async () => {
+  if (native) {
+    try {
+      const file = await native.openFile('project');
+      if (!file) return;
+      loadProjectJson(JSON.parse(file.text));
+      markDirty();
+    } catch (e) {
+      alert('Could not open project: ' + e.message);
+    }
+    return;
+  }
+  $('fileInput').click();
+});
 $('fileInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
@@ -833,7 +850,17 @@ $('fileInput').addEventListener('change', async (e) => {
   e.target.value = '';
 });
 
+const kindFromName = (name) =>
+  /\.(neku|nk|json)$/.test(name) ? 'project' :
+  name.endsWith('.nkp') ? 'prefab' :
+  name.endsWith('.nkt') ? 'theme' :
+  name.endsWith('.nkx') ? 'plugin' : 'any';
+
 function download(name, text, type = 'application/json') {
+  if (native) {
+    native.saveFile(name, text, kindFromName(name)).then((p) => p && conLine('log', ['saved ' + p]));
+    return;
+  }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([text], { type }));
   a.download = name;
@@ -850,6 +877,10 @@ $('btnSave').addEventListener('click', () => {
 const fetchRepoFile = async (path) => await (await fetch('../' + path)).text();
 
 function downloadBytes(name, bytes, type) {
+  if (native) {
+    native.saveFile(name, bytes, 'any').then((p) => p && conLine('log', ['saved ' + p]));
+    return;
+  }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([bytes], { type }));
   a.download = name;
@@ -931,6 +962,7 @@ function refreshAll() {
 }
 
 (async function boot() {
+  native = await initNative().catch(() => null);
   document.body.dataset.theme = localStorage.getItem('neku-theme') || 'neku-dark';
   $('themeSelect').value = document.body.dataset.theme;
 

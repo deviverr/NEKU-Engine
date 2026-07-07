@@ -9,6 +9,8 @@
     "start": "node tools/serve.js",
     "coop": "node tools/collab.js",
     "samples": "node tools/build-sample.js && node tools/build-arcade.js && node tools/build-breakout.js",
-    "export": "node tools/export.js projects/neku-arcade.json dist/neku-arcade.html"
+    "export": "node tools/export.js projects/neku-arcade.json dist/neku-arcade.html",
+    "mascot": "node tools/gen-mascot.js",
+    "desktop": "node tools/gen-mascot.js && node tools/build-desktop.js"
   }
 }

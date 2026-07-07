@@ -73,7 +73,13 @@ html, body {
   letter-spacing: 2px;
   text-shadow: 2px 2px 0 var(--shadow);
   user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
 }
+#logoCat { width: 22px; height: 22px; image-rendering: pixelated; }
+#logo:hover { filter: brightness(1.2); }
 
 .sep { width: 2px; height: 20px; background: var(--line); }
 .flex { flex: 1; }
