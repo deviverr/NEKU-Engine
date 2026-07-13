@@ -81,16 +81,19 @@ function crc32(bytes) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-// files: [{ name, text }] -> Uint8Array of a valid .zip
+// files: [{ name, text }] or [{ name, data: Uint8Array, mode?: 0o755 }]
+// -> Uint8Array of a valid .zip. Unix mode bits survive (macOS/Linux unzip
+// keeps executables executable — required for desktop game exports).
 export function makeZip(files) {
   const enc = new TextEncoder();
   const chunks = [];
   const central = [];
   let offset = 0;
 
-  for (const { name, text } of files) {
-    const nameB = enc.encode(name);
-    const data = enc.encode(text);
+  for (const file of files) {
+    const nameB = enc.encode(file.name);
+    const data = file.data instanceof Uint8Array ? file.data : enc.encode(file.text ?? '');
+    const mode = file.mode || 0o644;
     const crc = crc32(data);
     const header = new DataView(new ArrayBuffer(30));
     header.setUint32(0, 0x04034b50, true); // local file header
@@ -103,14 +106,15 @@ export function makeZip(files) {
     chunks.push(new Uint8Array(header.buffer), nameB, data);
 
     const c = new DataView(new ArrayBuffer(46));
-    c.setUint32(0, 0x02014b50, true); // central directory header
-    c.setUint16(4, 20, true);
+    c.setUint32(0, 0x02014b50, true);      // central directory header
+    c.setUint16(4, (3 << 8) | 20, true);   // made by: Unix, so mode bits apply
     c.setUint16(6, 20, true);
     c.setUint16(10, 0, true);
     c.setUint32(16, crc, true);
     c.setUint32(20, data.length, true);
     c.setUint32(24, data.length, true);
     c.setUint16(28, nameB.length, true);
+    c.setUint32(38, (mode | 0o100000) << 16, true); // external attrs: file + mode
     c.setUint32(42, offset, true);
     central.push(new Uint8Array(c.buffer), nameB);
     offset += 30 + nameB.length + data.length;

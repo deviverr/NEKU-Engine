@@ -5,35 +5,46 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Neku Studio</title>
 <link rel="icon" href="cwat.svg" />
+<style>
+/* Boot splash — inline so it paints before anything else loads. */
+#splash {
+  position: fixed; inset: 0; z-index: 9000;
+  background: #16121f; color: #e6e1f5;
+  display: grid; place-items: center;
+  font: 12px/1.5 ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  transition: opacity 0.35s;
+}
+#splash.bye { opacity: 0; pointer-events: none; }
+#splash .sp-box { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+#splash img { width: 88px; height: 88px; image-rendering: pixelated; animation: sp-bounce 1.1s ease-in-out infinite; filter: drop-shadow(4px 4px 0 #0a0812); }
+#splash .sp-title { font-size: 22px; font-weight: 700; letter-spacing: 5px; color: #29e6c4; text-shadow: 3px 3px 0 #0a0812; }
+#splash .sp-bar { width: 220px; height: 12px; border: 2px solid #3d3560; background: #1e1930; box-shadow: 2px 2px 0 #0a0812; }
+#splash .sp-fill { height: 100%; width: 4%; background: #29e6c4; transition: width 0.2s; }
+#splash .sp-status { color: #8d84ad; font-size: 10px; letter-spacing: 1px; min-height: 15px; }
+@keyframes sp-bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
+</style>
 <link rel="stylesheet" href="style.css" />
 </head>
 <body data-theme="neku-dark">
+<div id="splash">
+  <div class="sp-box">
+    <img src="cwat.svg" alt=">w<" />
+    <div class="sp-title">NEKU STUDIO</div>
+    <div class="sp-bar"><div class="sp-fill" id="splashFill"></div></div>
+    <div class="sp-status" id="splashStatus">waking up the cwat…</div>
+  </div>
+</div>
+
 <div id="app">
   <header id="toolbar">
-    <span id="logo" title="Neku Engine — back to main menu"><img src="cwat.svg" alt=">w<" id="logoCat" /> NEKU</span>
+    <span id="logo" title="Neku Engine — main menu"><img src="cwat.svg" alt=">w<" id="logoCat" /></span>
+    <nav id="menubar" aria-label="Main menu"></nav>
+    <span class="sep"></span>
     <input id="projectName" title="Project name" spellcheck="false" />
-    <span class="sep"></span>
-    <button id="btnNew">New</button>
-    <button id="btnOpen">Open</button>
-    <button id="btnSample">Samples ▾</button>
-    <button id="btnSave">Save</button>
-    <button id="btnExport">Export</button>
-    <span class="sep"></span>
+    <span class="flex"></span>
     <button id="btnCoop" title="Team Create — edit together live">◉ Co-op</button>
     <span id="peers"></span>
-    <span class="flex"></span>
-    <button id="btnTools" title="Paint, Settings, Layouts…">🛠 Tools ▾</button>
-    <select id="themeSelect" title="Editor theme">
-      <option value="neku-dark">▞ Neku Dark</option>
-      <option value="cwat">▞ Cwat</option>
-      <option value="crt-green">▚ CRT Green</option>
-      <option value="famicom">▞ Famicom</option>
-      <option value="synthwave">▞ Synthwave</option>
-      <option value="gameboy">▚ Gameboy</option>
-      <option value="paper">▚ Paper</option>
-      <option value="custom">★ Custom</option>
-    </select>
-    <button id="btnHelp" title="API cheatsheet & shortcuts">?</button>
+    <span class="sep"></span>
     <button id="btnPlay" class="accent" title="Run the game (Ctrl/Cmd+Enter)">▶ PLAY</button>
   </header>
 
@@ -73,14 +84,23 @@ settings.physics.gravity3d (default -9.82)</pre>
 pause ⏸ / step ⏭ buttons while playing · Errors panel lists
 syntax errors live · Output panel logs exports</pre>
         <h4>Shortcuts</h4>
-        <pre>Cmd/Ctrl+Enter play · Cmd/Ctrl+Z undo · Shift+drag snap
-arrows nudge · Del delete · double-click rename
+        <pre>Cmd/Ctrl+Enter play · Cmd/Ctrl+S save · Cmd/Ctrl+Z undo · Cmd/Ctrl+D duplicate
+Cmd/Ctrl+1/2/3 viewport 2D/3D/Game · Del delete · F2/double-click rename
+3D viewport: W move · E rotate · R scale · F focus selection · shift snaps
+2D: drag move · empty drag pan · wheel zoom · shift+drag snap · arrows nudge
 Timeline: scrub, edit node, ◆ Key · double-click row = key that track</pre>
         <div class="help-actions"><button data-help-close class="accent">Back to editor</button></div>
       </div>
     </div>
   </div>
   <div id="dockRoot"></div>
+
+  <footer id="statusbar">
+    <span id="statusMsg">ready >w<</span>
+    <span class="flex"></span>
+    <span id="statusCoop" hidden><span class="coop-dot on"></span><span id="statusCoopText"></span></span>
+    <span id="statusVer"></span>
+  </footer>
 </div>
 
 <!-- panel templates; dock.js adopts these -->

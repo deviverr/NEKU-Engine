@@ -1,26 +1,46 @@
-// Neku Studio — main editor: state, panels, viewports, play mode, co-op.
+// Neku Studio — main editor: state, menus, panels, viewports, play mode, co-op.
 
 import { Game, GameNode, hydrate, serialize, NODE_TYPES } from '../engine/core.js';
-import { buildExport } from '../engine/bundler.js';
+import { buildExport, buildZip } from '../engine/bundler.js';
+import { buildDesktopApps } from '../engine/desktop-export.js';
 import { Dock } from './dock.js';
 import { CodeEditor } from './codeeditor.js';
 import { Viewport2D } from './viewport2d.js';
 import { Viewport3D } from './viewport3d.js';
 import { CollabClient } from './collab.js';
 import { TimelinePanel } from './timeline.js';
-import { buildZip } from '../engine/bundler.js';
 import { initNative } from './native.js';
 import { WinManager } from './windows.js';
 import { openPaint } from './paint.js';
-import { openSettings, applyCustomTheme, clearCustomTheme } from './settingsui.js';
-import { openMainMenu, TEMPLATES, recordRecent } from './mainmenu.js';
+import { openPreferences, openProjectSettings, applyCustomTheme, clearCustomTheme } from './settingsui.js';
+import { openMainMenu, VERSION, TEMPLATES, recordRecent } from './mainmenu.js';
 import { PluginHost } from './plugins.js';
 import { ExplorerPanel, ErrorsPanel, OutputPanel } from './panels.js';
 import { getJson, getLocal, SESSION, setJson, setLocal } from './session.js';
+import { MenuBar } from './menubar.js';
+import { confirmDlg, promptDlg, infoDlg, toast } from './dialogs.js';
+import { openCoop } from './coop.js';
 
 let native = null; // desktop bridge (Neutralino) or null in the browser
 
 const $ = (id) => document.getElementById(id);
+
+const splash = {
+  set(pct, msg) {
+    const fill = $('splashFill');
+    if (fill) fill.style.width = pct + '%';
+    if (msg) $('splashStatus').textContent = msg;
+  },
+  done() {
+    splash.set(100, 'ready >w<');
+    const el = $('splash');
+    setTimeout(() => {
+      el.classList.add('bye');
+      setTimeout(() => el.remove(), 400);
+    }, 120);
+  },
+};
+splash.set(12, 'loading engine…');
 
 // ------------------------------------------------------------------ state
 
@@ -40,6 +60,8 @@ const ed = {
   markDirty,
   refreshInspector,
   session: SESSION,
+  onCoopStatus: null,   // co-op window hooks these to stay live
+  onPeersChanged: null,
 };
 window.__neku = ed; // debug/testing hook
 
@@ -53,7 +75,7 @@ let activeTab = '2d';
 const undoStack = [], redoStack = [];
 let lastSnapshot = null;
 
-const COLOR_KEYS = new Set(['color', 'textColor', 'strokeColor', 'hoverColor', 'pressColor', 'shadow', 'background', 'emissive', 'groundColor']);
+const COLOR_KEYS = new Set(['color', 'textColor', 'strokeColor', 'hoverColor', 'pressColor', 'shadow', 'background', 'emissive', 'groundColor', 'bg', 'border']);
 const ENUM_FIELDS = {
   shape: ['box', 'sphere', 'plane', 'cylinder', 'cone', 'torus', 'model'],
   kind: ['directional', 'ambient', 'point', 'hemi'],
@@ -65,26 +87,30 @@ const ENUM_FIELDS = {
 const IMAGE_FIELDS = new Set(['asset', 'texture', 'tileset']);
 const MODEL_FIELDS = new Set(['model']);
 const HIDDEN_FIELDS = new Set(['tiles']);
+// 0..max sliders — material and light fields feel like dials, not numbers.
+const RANGE_FIELDS = { metalness: 1, roughness: 1, opacity: 1, intensity: 3, emissiveIntensity: 3, glow: 2 };
+
+// Inspector groups, in display order. Everything else lands in "Other".
+const PROP_GROUPS = [
+  ['Transform', ['x', 'y', 'z', 'rx', 'ry', 'rz', 'sx', 'sy', 'sz', 'scaleX', 'scaleY', 'rotation']],
+  ['Shape', ['shape', 'model', 'w', 'h', 'd', 'radius', 'segments', 'text', 'placeholder', 'size', 'bold', 'align', 'font', 'maxLength']],
+  ['Material', ['color', 'textColor', 'bg', 'border', 'texture', 'asset', 'metalness', 'roughness', 'emissive', 'emissiveIntensity', 'opacity', 'unlit', 'wireframe', 'castShadow', 'receiveShadow', 'glow']],
+  ['Camera & Light', ['kind', 'intensity', 'range', 'groundColor', 'tx', 'ty', 'tz', 'fov', 'near', 'far']],
+  ['Sprite Sheet', ['sheetCols', 'sheetRows', 'frame', 'fps', 'playing']],
+  ['Tilemap', ['tileset', 'tileW', 'tileH', 'cols', 'rows', 'collision']],
+  ['Physics', ['body', 'body3d', 'mass', 'friction', 'restitution', 'vx', 'vy', 'gravityScale', 'bounce']],
+  ['Particles', ['gravity']],
+];
 
 function emptyProjectJson() {
-  return {
-    name: 'New Game',
-    engine: 'neku-0.2',
-    settings: { width: 480, height: 720, background: '#1b2735', pixelated: false, uiMode: 'overlay' },
-    mainScene: 'Main',
-    scenes: [{ name: 'Main', root: { type: 'Node', name: 'Main' } }],
-    scripts: {},
-    assets: {},
-    anims: {},
-    prefabs: {},
-  };
+  return structuredClone(TEMPLATES['Blank']);
 }
 
 function serializeProject() {
   const p = ed.project;
   return {
     name: p.name,
-    engine: 'neku-0.2',
+    engine: 'neku-2',
     settings: { ...p.settings },
     mainScene: p.mainScene,
     scenes: p.scenes.map((s) => ({ name: s.name, root: serialize(s.root) })),
@@ -134,12 +160,20 @@ function markDirty(pushUndo = true) {
   lastSnapshot = now;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try { setLocal('neku-project', now); } catch { /* best-effort */ }
+    try {
+      setLocal('neku-project', now);
+      status(`autosaved · ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+    } catch { /* best-effort */ }
     recordRecent(ed.project.name, JSON.parse(now));
     errorsPanel.check();
     explorer.refresh();
   }, 400);
-  collab.sendDoc(() => JSON.parse(now));
+  collab.sendDoc(() => {
+    const doc = JSON.parse(JSON.stringify(serializeProject()));
+    doc.assets = {}; // assets travel separately, chunked (see collab.js)
+    return doc;
+  });
+  collab.syncAssets(ed.project.assets);
 }
 
 function undo() {
@@ -168,7 +202,14 @@ function rebuildAssets() {
   }
 }
 
+function status(msg) {
+  const el = $('statusMsg');
+  if (el) el.textContent = msg;
+}
+
 // ------------------------------------------------------------------- dock
+
+splash.set(30, 'building panels…');
 
 const dock = new Dock($('dockRoot'));
 
@@ -189,7 +230,6 @@ center.innerHTML = `
     <div class="vp-pane active" data-vp="2d"></div>
     <div class="vp-pane" data-vp="3d"></div>
     <div class="vp-pane" data-vp="game"><div id="playMount"></div></div>
-    <div id="vpHint">drag: move · empty drag: pan/orbit · wheel: zoom · shift: snap · del: delete</div>
   </div>`;
 
 dock.addPanel({ id: 'hierarchy', title: 'Scene', zone: 'left', el: panelFromTemplate('tpl-hierarchy') });
@@ -231,15 +271,24 @@ for (const tab of center.querySelectorAll('#vpTabs .zone-tab')) {
   tab.addEventListener('click', () => setVpTab(tab.dataset.vp));
 }
 
+const VP_HINTS = {
+  '2d': 'drag: move · empty drag: pan · wheel: zoom · shift: snap · arrows: nudge · del: delete',
+  '3d': 'W/E/R: move/rotate/scale · drag empty: orbit · F: focus · shift: snap',
+  'game': 'Cmd/Ctrl+Enter stops · ⏸ pause · ⏭ step',
+};
+
 function setVpTab(name) {
   activeTab = name;
   for (const t of center.querySelectorAll('#vpTabs .zone-tab')) t.classList.toggle('active', t.dataset.vp === name);
   for (const p of center.querySelectorAll('.vp-pane')) p.classList.toggle('active', p.dataset.vp === name);
   if (name !== 'game' && playing) stopPlay();
+  status(VP_HINTS[name] || 'ready');
 }
 
 const vp2d = new Viewport2D(center.querySelector('.vp-pane[data-vp="2d"]'), ed);
 const vp3d = new Viewport3D(center.querySelector('.vp-pane[data-vp="3d"]'), ed);
+ed.vp2d = vp2d; // debug/testing hooks, like window.__neku itself
+ed.vp3d = vp3d;
 
 // -------------------------------------------------------------- hierarchy
 
@@ -274,14 +323,20 @@ function refreshTree() {
       }
       select(node);
     });
-    row.addEventListener('dblclick', () => {
-      const name = prompt('Rename node', node.name);
-      if (name) { node.name = name; markDirty(); refreshAll(); }
-    });
+    row.addEventListener('dblclick', () => renameNode(node));
     tree.appendChild(row);
     for (const c of node.children) addRow(c, depth + 1);
   };
   addRow(ed.scene().root, 0);
+}
+
+async function renameNode(node) {
+  const name = await promptDlg({ title: 'RENAME NODE', value: node.name });
+  if (name && name !== node.name) {
+    node.name = name;
+    markDirty();
+    refreshAll();
+  }
 }
 
 function select(node) {
@@ -348,31 +403,16 @@ function refreshInspector() {
   const sel = ed.sel;
 
   if (!sel || !sel.parent) {
-    box.appendChild(section('Project'));
-    const s = ed.project.settings;
-    box.appendChild(propRow('width', s.width, 'number', (v) => { s.width = +v; markDirty(); }));
-    box.appendChild(propRow('height', s.height, 'number', (v) => { s.height = +v; markDirty(); }));
-    box.appendChild(propRow('background', s.background, 'color', (v) => { s.background = v; markDirty(); }));
-    box.appendChild(propRow('pixelated', s.pixelated, 'checkbox', (v) => { s.pixelated = v; markDirty(); }));
-    box.appendChild(enumRow('uiMode', s.uiMode || 'overlay', ['overlay', 'screen3d'], (v) => { s.uiMode = v; markDirty(); }));
-    box.appendChild(section('Physics'));
-    s.physics = s.physics || {};
-    box.appendChild(propRow('gravity', s.physics.gravity ?? 900, 'number', (v) => { s.physics.gravity = +v; markDirty(); }));
-    box.appendChild(section('Screen FX (CRT)'));
-    s.fx = s.fx || {};
-    box.appendChild(propRow('crt', !!s.fx.crt, 'checkbox', (v) => { s.fx.crt = v; markDirty(); }));
-    if (s.fx.crt) {
-      for (const [k, def] of [['curvature', 0.07], ['scanlines', 0.35], ['vignette', 0.35], ['flicker', 0.02], ['noise', 0.04], ['glow', 0.25], ['aberration', 0.0015]]) {
-        box.appendChild(propRow(k, s.fx[k] ?? def, 'number', (v) => { s.fx[k] = +v; markDirty(); }));
-      }
-    }
+    // Nothing (or the scene root) selected: point at the right homes instead
+    // of duplicating Project Settings here.
+    const empty = document.createElement('div');
+    empty.className = 'empty-box';
+    empty.innerHTML = `<img src="cwat.svg" alt="" />
+      <div>${sel ? 'Scene root — add nodes from the Scene panel.' : 'Select a node to edit it.'}</div>`;
+    const btn = actionBtn('⚙ Project Settings…', () => openProjectSettings(winman, ed));
+    empty.appendChild(btn);
+    box.appendChild(empty);
     if (sel) box.appendChild(scriptRow(sel));
-    if (!sel) {
-      const d = document.createElement('div');
-      d.className = 'empty';
-      d.textContent = 'Select a node to edit it.';
-      box.appendChild(d);
-    }
     box.scrollTop = scrollY;
     return;
   }
@@ -386,27 +426,20 @@ function refreshInspector() {
     !k.startsWith('_') && !['id', 'type', 'name', 'is3D', 'children', 'parent', 'script', 'visible'].includes(k) && typeof sel[k] !== 'function'
   )]);
 
-  box.appendChild(section('Properties'));
-  for (const key of keys) {
-    if (HIDDEN_FIELDS.has(key)) continue;
-    const val = sel[key] ?? defaults[key];
-    if (ENUM_FIELDS[key]) {
-      box.appendChild(enumRow(key, val, ENUM_FIELDS[key], (v) => { sel[key] = v; markDirty(); }));
-    } else if (IMAGE_FIELDS.has(key) || MODEL_FIELDS.has(key)) {
-      const names = Object.keys(ed.project.assets).filter((n) =>
-        MODEL_FIELDS.has(key) ? /\.(glb|gltf)$/i.test(n) : (ed.project.assets[n].startsWith('data:image') || /\.(png|jpe?g|webp|gif)$/i.test(n))
-      );
-      box.appendChild(enumRow(key, val, ['', ...names], (v) => { sel[key] = v; markDirty(); }));
-    } else {
-      let kind = 'text';
-      if (typeof val === 'boolean') kind = 'checkbox';
-      else if (typeof val === 'number') kind = 'number';
-      else if (COLOR_KEYS.has(key) && /^#[0-9a-fA-F]{6}$/.test(String(val))) kind = 'color';
-      box.appendChild(propRow(key, val, kind, (v) => {
-        sel[key] = kind === 'number' ? +v : v;
-        markDirty();
-      }));
+  // Grouped, ordered fields; anything unmapped lands in "Other".
+  const remaining = new Set([...keys].filter((k) => !HIDDEN_FIELDS.has(k)));
+  for (const [title, fields] of PROP_GROUPS) {
+    const present = fields.filter((f) => remaining.has(f));
+    if (!present.length) continue;
+    box.appendChild(section(title));
+    for (const key of present) {
+      remaining.delete(key);
+      box.appendChild(fieldRow(sel, key, sel[key] ?? defaults[key]));
     }
+  }
+  if (remaining.size) {
+    box.appendChild(section('Other'));
+    for (const key of remaining) box.appendChild(fieldRow(sel, key, sel[key] ?? defaults[key]));
   }
 
   // Physics quick-add for 2D visual nodes.
@@ -417,7 +450,7 @@ function refreshInspector() {
 
   // Tilemap painting tools.
   if (sel.type === 'Tilemap') {
-    box.appendChild(section('Paint'));
+    box.appendChild(section('Paint tiles'));
     const paintBtn = actionBtn(ed.paint.active ? '■ Stop painting' : '✏ Paint tiles', () => {
       ed.paint.active = !ed.paint.active;
       refreshInspector();
@@ -447,28 +480,64 @@ function refreshInspector() {
   const actions = document.createElement('div');
   actions.className = 'prop-actions';
   actions.append(
-    actionBtn('★ Prefab', () => {
-      const name = prompt('Save selection as prefab:', sel.name);
+    actionBtn('★ Prefab', async () => {
+      const name = await promptDlg({ title: 'SAVE PREFAB', label: 'Save selection as prefab:', value: sel.name });
       if (!name) return;
       (ed.project.prefabs ||= {})[name] = serialize(sel);
       markDirty();
       refreshAddMenu();
+      toast(`Prefab "${name}" saved`, 'ok');
     }),
-    actionBtn('Duplicate', () => {
-      const copy = hydrate(serialize(sel));
-      copy.name = uniqueName(sel.name.replace(/\d+$/, ''));
-      if (!copy.is3D) { copy.x = (copy.x || 0) + 20; copy.y = (copy.y || 0) + 20; }
-      else copy.x = (copy.x || 0) + 1;
-      sel.parent.addChild(copy);
-      markDirty();
-      select(copy);
-    }),
+    actionBtn('Duplicate', duplicateSel),
     actionBtn('↑', () => reorder(-1)),
     actionBtn('↓', () => reorder(1)),
     actionBtn('Delete', deleteSel, 'danger'),
   );
   box.appendChild(actions);
   box.scrollTop = scrollY;
+}
+
+function fieldRow(sel, key, val) {
+  if (ENUM_FIELDS[key]) {
+    return enumRow(key, val, ENUM_FIELDS[key], (v) => { sel[key] = v; markDirty(); });
+  }
+  if (IMAGE_FIELDS.has(key) || MODEL_FIELDS.has(key)) {
+    const names = Object.keys(ed.project.assets).filter((n) =>
+      MODEL_FIELDS.has(key) ? /\.(glb|gltf)$/i.test(n) : (ed.project.assets[n].startsWith('data:image') || /\.(png|jpe?g|webp|gif)$/i.test(n))
+    );
+    const row = enumRow(key, val, ['', ...names], (v) => { sel[key] = v; markDirty(); });
+    if (IMAGE_FIELDS.has(key)) {
+      // ✎ opens the current texture straight in Paint.
+      const wrap = document.createElement('div');
+      wrap.className = 'with-btn';
+      const selEl = row.querySelector('select');
+      selEl.remove();
+      wrap.appendChild(selEl);
+      const edit = document.createElement('button');
+      edit.className = 'asset-edit';
+      edit.title = 'Edit in Paint';
+      edit.textContent = '✎';
+      edit.addEventListener('click', () => {
+        const name = selEl.value;
+        if (name && ed.project.assets[name]?.startsWith('data:image')) openPaint(winman, ed, name);
+        else openPaint(winman, ed);
+      });
+      wrap.appendChild(edit);
+      row.appendChild(wrap);
+    }
+    return row;
+  }
+  if (key in RANGE_FIELDS && typeof (val ?? 0) === 'number') {
+    return rangeRow(key, val ?? 0, RANGE_FIELDS[key], (v) => { sel[key] = v; markDirty(); });
+  }
+  let kind = 'text';
+  if (typeof val === 'boolean') kind = 'checkbox';
+  else if (typeof val === 'number') kind = 'number';
+  else if (COLOR_KEYS.has(key) && /^#[0-9a-fA-F]{6}$/.test(String(val))) kind = 'color';
+  return propRow(key, val, kind, (v) => {
+    sel[key] = kind === 'number' ? +v : v;
+    markDirty();
+  });
 }
 
 function drawPalette(pal, map) {
@@ -496,6 +565,18 @@ function drawPalette(pal, map) {
     c.lineWidth = 2;
     c.strokeRect((ed.paint.tile % 4) * tw, 0, tw, th);
   }
+}
+
+function duplicateSel() {
+  const sel = ed.sel;
+  if (!sel || !sel.parent) return;
+  const copy = hydrate(serialize(sel));
+  copy.name = uniqueName(sel.name.replace(/\d+$/, ''));
+  if (!copy.is3D) { copy.x = (copy.x || 0) + 20; copy.y = (copy.y || 0) + 20; }
+  else copy.x = (copy.x || 0) + 1;
+  sel.parent.addChild(copy);
+  markDirty();
+  select(copy);
 }
 
 function reorder(dir) {
@@ -548,6 +629,31 @@ function propRow(label, value, kind, onChange) {
   return row;
 }
 
+function rangeRow(label, value, max, onChange) {
+  const row = document.createElement('div');
+  row.className = 'prop-row';
+  const lab = document.createElement('label');
+  lab.textContent = label;
+  const wrap = document.createElement('div');
+  wrap.className = 'range-wrap';
+  const input = document.createElement('input');
+  input.type = 'range';
+  input.min = 0;
+  input.max = max;
+  input.step = 0.01;
+  input.value = value;
+  const readout = document.createElement('span');
+  readout.className = 'range-val';
+  readout.textContent = (+value).toFixed(2);
+  input.addEventListener('input', () => {
+    readout.textContent = (+input.value).toFixed(2);
+    onChange(+input.value);
+  });
+  wrap.append(input, readout);
+  row.append(lab, wrap);
+  return row;
+}
+
 function enumRow(label, value, options, onChange) {
   const row = document.createElement('div');
   row.className = 'prop-row';
@@ -569,9 +675,9 @@ function scriptRow(node) {
   selEl.innerHTML = '<option value="">— none —</option>' +
     Object.keys(ed.project.scripts).map((n) => `<option${n === node.script ? ' selected' : ''}>${n}</option>`).join('') +
     '<option value="__new__">+ new script…</option>';
-  selEl.addEventListener('change', () => {
+  selEl.addEventListener('change', async () => {
     if (selEl.value === '__new__') {
-      const name = addScript();
+      const name = await addScript();
       if (name) node.script = name;
     } else {
       node.script = selEl.value || null;
@@ -605,6 +711,9 @@ async function importAssetFiles(files) {
       r.readAsDataURL(file);
     });
     ed.project.assets[file.name] = url;
+    if (/\.(glb|gltf)$/i.test(file.name)) {
+      toast(`Model "${file.name}" imported — use a Mesh3D with shape "model"`, 'ok', 4200);
+    }
   }
   rebuildAssets();
   markDirty();
@@ -623,8 +732,12 @@ function refreshAssets() {
       (isImg ? `<img src="${url}" alt="">` : `<div class="asset-icon">${icon}</div>`) +
       `<div class="asset-name" title="${name}">${name}</div>` +
       `<button class="asset-del" title="Remove asset">✕</button>`;
-    card.querySelector('.asset-del').addEventListener('click', () => {
-      if (!confirm(`Remove asset "${name}"?`)) return;
+    if (isImg && url.startsWith('data:image')) {
+      card.title = 'Double-click to edit in Paint';
+      card.addEventListener('dblclick', () => openPaint(winman, ed, name));
+    }
+    card.querySelector('.asset-del').addEventListener('click', async () => {
+      if (!(await confirmDlg({ title: 'REMOVE ASSET', message: `Remove asset "${name}"?`, okText: 'Remove', danger: true }))) return;
       delete ed.project.assets[name];
       rebuildAssets();
       markDirty();
@@ -644,7 +757,11 @@ const codeEditor = new CodeEditor($('codePane'), {
     if (currentScript) {
       ed.project.scripts[currentScript] = src;
       markDirty(false);
-      collab.sendDoc(serializeProject);
+      collab.sendDoc(() => {
+        const doc = serializeProject();
+        doc.assets = {};
+        return doc;
+      });
     }
   },
 });
@@ -664,16 +781,17 @@ function openScript(name) {
 
 $('scriptSelect').addEventListener('change', (e) => openScript(e.target.value));
 $('btnAddScript').addEventListener('click', addScript);
-$('btnDelScript').addEventListener('click', () => {
-  if (!currentScript || !confirm(`Delete script "${currentScript}"?`)) return;
+$('btnDelScript').addEventListener('click', async () => {
+  if (!currentScript) return;
+  if (!(await confirmDlg({ title: 'DELETE SCRIPT', message: `Delete script "${currentScript}"?`, okText: 'Delete', danger: true }))) return;
   delete ed.project.scripts[currentScript];
   currentScript = null;
   markDirty();
   refreshScripts();
 });
 
-function addScript() {
-  let name = prompt('Script name', 'Script.js');
+async function addScript() {
+  let name = await promptDlg({ title: 'NEW SCRIPT', label: 'Script name', value: 'Script.js' });
   if (!name) return null;
   if (!name.endsWith('.js')) name += '.js';
   if (ed.project.scripts[name] == null) {
@@ -791,13 +909,35 @@ $('btnPlay').addEventListener('click', () => (playing ? stopPlay() : startPlay()
 // ------------------------------------------------------------------ co-op
 
 const collab = new CollabClient({
-  onSnapshot: (doc) => loadProjectJson(doc, { keepSelection: true }),
-  onDoc: (doc) => loadProjectJson(doc, { keepSelection: true }),
+  onSnapshot: (doc) => {
+    // Fresh room state: assets stream in right after the welcome.
+    doc.assets = {};
+    loadProjectJson(doc, { keepSelection: true });
+  },
+  onDoc: (doc) => {
+    // Doc syncs without assets — keep the local asset store.
+    doc.assets = { ...ed.project.assets };
+    loadProjectJson(doc, { keepSelection: true });
+  },
+  onAsset: (name, url) => {
+    ed.project.assets[name] = url;
+    rebuildAssets();
+    refreshAssets();
+    refreshInspector();
+    markDirty(false);
+  },
+  onAssetDel: (name) => {
+    delete ed.project.assets[name];
+    rebuildAssets();
+    refreshAssets();
+    markDirty(false);
+  },
   onPeers: (list) => {
     ed.peers.clear();
     for (const p of list) if (p.id !== collab.id) ed.peers.set(p.id, p);
     refreshPeersUI();
     refreshTree();
+    ed.onPeersChanged?.();
   },
   onPresence: (m) => {
     if (m.id === collab.id) return;
@@ -805,12 +945,23 @@ const collab = new CollabClient({
     ed.peers.set(m.id, { ...peer, ...m });
     refreshPeersUI();
     refreshTree();
+    ed.onPeersChanged?.();
   },
   onStatus: (s) => {
-    $('btnCoop').classList.toggle('on', s === 'online');
-    $('btnCoop').textContent = s === 'online' ? '◉ Co-op ON' : '◉ Co-op';
-    if (s.startsWith('error')) conLine('error', ['[co-op] ' + s]);
+    const online = s === 'online';
+    $('btnCoop').classList.toggle('on', online);
+    $('btnCoop').textContent = online ? '◉ Co-op ON' : s === 'reconnecting' ? '◌ Co-op…' : '◉ Co-op';
+    $('statusCoop').hidden = !online;
+    if (online) {
+      $('statusCoopText').textContent = 'co-op · room ' + getLocal('neku-coop-room', '');
+      toast('Co-op session live — room ' + getLocal('neku-coop-room', ''), 'ok');
+      // Hosts push their current project into a fresh room.
+      markDirty(false);
+    }
+    if (s === 'reconnecting') status('co-op: reconnecting…');
+    ed.onCoopStatus?.();
   },
+  onError: (message) => toast('[co-op] ' + message, 'err', 4000),
 });
 
 function refreshPeersUI() {
@@ -825,29 +976,17 @@ function refreshPeersUI() {
   }
 }
 
-$('btnCoop').addEventListener('click', () => {
-  if (collab.connected) {
-    if (confirm('Disconnect from co-op session?')) collab.disconnect();
-    return;
-  }
-  const url = prompt('Co-op server (run: npm run coop)', getLocal('neku-coop-url', 'ws://localhost:8348'));
-  if (!url) return;
-  const name = prompt('Your name', getLocal('neku-coop-name', SESSION.clientId.replace(/^client-/, 'dev-')));
-  if (!name) return;
-  setLocal('neku-coop-url', url);
-  setLocal('neku-coop-name', name);
-  collab.connect({ url, room: SESSION.id + ':' + ed.project.name, name });
-});
+$('btnCoop').addEventListener('click', () => openCoop(winman, ed, collab));
 
-// ---------------------------------------------------------------- toolbar
+// ----------------------------------------------------------------- menus
 
 $('projectName').addEventListener('change', () => { ed.project.name = $('projectName').value; markDirty(); });
 
-$('themeSelect').addEventListener('change', () => {
-  const name = $('themeSelect').value;
+function setTheme(name) {
   clearCustomTheme();
   if (name === 'custom') {
     const saved = getJson('neku-custom-theme', null);
+    document.body.dataset.theme = 'neku-dark';
     if (saved?.vars) applyCustomTheme(saved.vars);
   } else if (plugins.themes[name]) {
     document.body.dataset.theme = 'neku-dark';
@@ -856,108 +995,19 @@ $('themeSelect').addEventListener('change', () => {
     document.body.dataset.theme = name;
   }
   setLocal('neku-theme', name);
-});
-
-function refreshPluginRegistry() {
-  // plugin themes appear in the theme dropdown under a group
-  $('themeSelect').querySelector('optgroup[label="Plugins"]')?.remove();
-  const names = Object.keys(plugins.themes);
-  if (names.length) {
-    const g = document.createElement('optgroup');
-    g.label = 'Plugins';
-    for (const n of names) {
-      const o = document.createElement('option');
-      o.value = o.textContent = n;
-      g.appendChild(o);
-    }
-    $('themeSelect').appendChild(g);
-  }
-}
-plugins.onRegistry = refreshPluginRegistry;
-
-$('btnNew').addEventListener('click', () => {
-  if (!confirm('Start a new empty project? (current work stays in browser autosave until then)')) return;
-  loadProjectJson(emptyProjectJson());
-  markDirty(false);
-});
-
-// --- popup menus ---
-
-let openPopup = null;
-function closePopup() {
-  openPopup?.remove();
-  openPopup = null;
-}
-function popupMenu(anchor, items) {
-  if (openPopup) return closePopup();
-  const menu = document.createElement('div');
-  menu.className = 'popup-menu';
-  for (const it of items) {
-    const b = document.createElement('button');
-    b.innerHTML = `<b>${it.label}</b>` + (it.desc ? `<span>${it.desc}</span>` : '');
-    b.addEventListener('click', () => {
-      closePopup();
-      it.action();
-    });
-    menu.appendChild(b);
-  }
-  const r = anchor.getBoundingClientRect();
-  menu.style.left = Math.min(r.left, innerWidth - 320) + 'px';
-  menu.style.top = r.bottom + 4 + 'px';
-  document.body.appendChild(menu);
-  openPopup = menu;
-  setTimeout(() => {
-    addEventListener('pointerdown', function close(e) {
-      if (!menu.contains(e.target)) {
-        closePopup();
-        removeEventListener('pointerdown', close, true);
-      }
-    }, true);
-  });
 }
 
-async function loadSample(file) {
-  try {
-    loadProjectJson(await (await fetch(`../projects/${file}.json`)).json());
-    markDirty();
-  } catch (e) {
-    alert('Could not load sample: ' + e.message);
-  }
-}
+const fetchRepoFile = async (path) => await (await fetch('../' + path)).text();
+const fetchRepoBytes = async (path) => {
+  const local = await fetch('../' + path).catch(() => null);
+  if (local?.ok) return new Uint8Array(await local.arrayBuffer());
+  // Hosted mirrors (and the desktop Studio) fall back to the Pages copy.
+  const remote = await fetch('https://deviverr.github.io/NEKU-Engine/' + path);
+  if (!remote.ok) throw new Error('could not fetch ' + path);
+  return new Uint8Array(await remote.arrayBuffer());
+};
 
-$('btnSample').addEventListener('click', () =>
-  popupMenu($('btnSample'), [
-    { label: '🕹 Neku Arcade', desc: '3D room · clickable CRT slot machine · post-FX', action: () => loadSample('neku-arcade') },
-    { label: '🧮 Casino Calculator', desc: '2D UI + 3D coin · the original gamble-culator', action: () => loadSample('casino-calculator') },
-    { label: '🧱 Neku Breakout', desc: 'pure 2D · physics · exports ~45 KB', action: () => loadSample('neku-breakout') },
-  ])
-);
-
-$('btnOpen').addEventListener('click', async () => {
-  if (native) {
-    try {
-      const file = await native.openFile('project');
-      if (!file) return;
-      loadProjectJson(JSON.parse(file.text));
-      markDirty();
-    } catch (e) {
-      alert('Could not open project: ' + e.message);
-    }
-    return;
-  }
-  $('fileInput').click();
-});
-$('fileInput').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  try {
-    loadProjectJson(JSON.parse(await file.text()));
-    markDirty();
-  } catch (err) {
-    alert('Not a valid Neku project: ' + err.message);
-  }
-  e.target.value = '';
-});
+const slug = (s) => (s || 'game').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'game';
 
 const kindFromName = (name) =>
   /\.(neku|nk|json)$/.test(name) ? 'project' :
@@ -967,7 +1017,7 @@ const kindFromName = (name) =>
 
 function download(name, text, type = 'application/json') {
   if (native) {
-    native.saveFile(name, text, kindFromName(name)).then((p) => p && conLine('log', ['saved ' + p]));
+    native.saveFile(name, text, kindFromName(name)).then((p) => p && status('saved ' + p));
     return;
   }
   const a = document.createElement('a');
@@ -977,17 +1027,9 @@ function download(name, text, type = 'application/json') {
   URL.revokeObjectURL(a.href);
 }
 
-const slug = (s) => (s || 'game').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'game';
-
-$('btnSave').addEventListener('click', () => {
-  download(slug(ed.project.name) + '.neku', JSON.stringify(serializeProject(), null, 2));
-});
-
-const fetchRepoFile = async (path) => await (await fetch('../' + path)).text();
-
 function downloadBytes(name, bytes, type) {
   if (native) {
-    native.saveFile(name, bytes, 'any').then((p) => p && conLine('log', ['saved ' + p]));
+    native.saveFile(name, bytes, 'any').then((p) => p && status('saved ' + p));
     return;
   }
   const a = document.createElement('a');
@@ -995,119 +1037,6 @@ function downloadBytes(name, bytes, type) {
   a.download = name;
   a.click();
   URL.revokeObjectURL(a.href);
-}
-
-$('btnExport').addEventListener('click', () =>
-  popupMenu($('btnExport'), [
-    {
-      label: '⬇ HTML file',
-      desc: 'one self-contained file — open anywhere, host anywhere',
-      action: async () => {
-        const t0 = performance.now();
-        try {
-          const html = await buildExport(serializeProject(), fetchRepoFile);
-          download(slug(ed.project.name) + '.html', html, 'text/html');
-          output.log(`export HTML: ${slug(ed.project.name)}.html — ${(html.length / 1024).toFixed(1)} KB in ${Math.round(performance.now() - t0)} ms`);
-          plugins.emit('export', { kind: 'html' });
-          dock.activate('output');
-        } catch (e) {
-          alert('Export failed: ' + e.message);
-          output.log('export FAILED: ' + e.message);
-        }
-      },
-    },
-    {
-      label: '⬇ itch.io ZIP',
-      desc: 'index.html in a zip — upload straight to itch.io (HTML game)',
-      action: async () => {
-        const t0 = performance.now();
-        try {
-          const bytes = await buildZip(serializeProject(), fetchRepoFile);
-          downloadBytes(slug(ed.project.name) + '.zip', bytes, 'application/zip');
-          output.log(`export itch.io ZIP: ${slug(ed.project.name)}.zip — ${(bytes.length / 1024).toFixed(1)} KB in ${Math.round(performance.now() - t0)} ms`);
-          plugins.emit('export', { kind: 'zip' });
-          dock.activate('output');
-        } catch (e) {
-          alert('Export failed: ' + e.message);
-          output.log('export FAILED: ' + e.message);
-        }
-      },
-    },
-    {
-      label: '⬇ Project .neku',
-      desc: 'the editable source — commit this to git',
-      action: () => download(slug(ed.project.name) + '.neku', JSON.stringify(serializeProject(), null, 2)),
-    },
-    {
-      label: '⬇ Prefab .nkp',
-      desc: 'selected node subtree as a shareable prefab file',
-      action: () => {
-        if (!ed.sel) return alert('Select a node first.');
-        download(slug(ed.sel.name) + '.nkp', JSON.stringify({ neku: 'prefab', name: ed.sel.name, node: serialize(ed.sel) }, null, 2));
-      },
-    },
-    {
-      label: '⬆ Import prefab .nkp',
-      desc: 'add a prefab file to this project',
-      action: async () => {
-        const file = native ? await native.openFile('prefab') : await pickWebFile('.nkp,.json');
-        if (!file) return;
-        try {
-          const p = JSON.parse(file.text);
-          if (p.neku !== 'prefab') throw new Error('not a .nkp prefab');
-          (ed.project.prefabs ||= {})[p.name] = p.node;
-          markDirty();
-          refreshAddMenu();
-          explorer.refresh();
-          output.log(`imported prefab "${p.name}"`);
-        } catch (e) { alert('Import failed: ' + e.message); }
-      },
-    },
-  ])
-);
-
-// --- Tools menu, main menu, settings, paint, layouts ---
-
-const LAYOUTS = {
-  'Default': [{ hierarchy: 'left', assets: 'left', inspector: 'right', script: 'bottom', console: 'bottom', timeline: 'bottom' }, { left: 230, right: 270, bottom: 240 }],
-  'Code': [{ hierarchy: 'left', assets: 'left', inspector: 'left', script: 'right', console: 'bottom', timeline: 'bottom' }, { left: 220, right: 480, bottom: 160 }],
-  'Animation': [{ hierarchy: 'left', assets: 'left', inspector: 'right', timeline: 'bottom', script: 'bottom', console: 'bottom' }, { left: 200, right: 260, bottom: 300 }],
-  'Art': [{ assets: 'right', hierarchy: 'left', inspector: 'right', script: 'bottom', console: 'bottom', timeline: 'bottom' }, { left: 200, right: 320, bottom: 180 }],
-};
-
-function themeContext() {
-  return {
-    plugins,
-    native,
-    download,
-    setTheme(name) {
-      $('themeSelect').value = name;
-      if (name !== 'custom') {
-        clearCustomTheme();
-        document.body.dataset.theme = plugins.themes[name] ? 'neku-dark' : name;
-        if (plugins.themes[name]) applyCustomTheme(plugins.themes[name]);
-      }
-      setLocal('neku-theme', name);
-    },
-    async openThemeFile() {
-      const file = native ? await native.openFile('theme') : await pickWebFile('.nkt,.json');
-      if (!file) return;
-      try {
-        const t = JSON.parse(file.text);
-        if (!t.vars) throw new Error('not a .nkt theme');
-        setJson('neku-custom-theme', t);
-        setLocal('neku-theme', 'custom');
-        applyCustomTheme(t.vars);
-        $('themeSelect').value = 'custom';
-      } catch (e) {
-        alert('Could not load theme: ' + e.message);
-      }
-    },
-    async openPluginFile() {
-      return native ? await native.openFile('plugin') : await pickWebFile('.nkx,.js');
-    },
-    log: (msg) => output.log(msg),
-  };
 }
 
 // Browser fallback file picker returning { name, text }.
@@ -1124,6 +1053,153 @@ function pickWebFile(accept) {
   });
 }
 
+function prefsContext() {
+  return {
+    plugins,
+    native,
+    download,
+    setTheme,
+    async openThemeFile() {
+      const file = native ? await native.openFile('theme') : await pickWebFile('.nkt,.json');
+      if (!file) return;
+      try {
+        const t = JSON.parse(file.text);
+        if (!t.vars) throw new Error('not a .nkt theme');
+        setJson('neku-custom-theme', t);
+        setTheme('custom');
+        toast('Theme imported', 'ok');
+      } catch (e) {
+        toast('Could not load theme: ' + e.message, 'err');
+      }
+    },
+    async openPluginFile() {
+      return native ? await native.openFile('plugin') : await pickWebFile('.nkx,.js');
+    },
+    log: (msg) => output.log(msg),
+  };
+}
+
+async function openProject() {
+  if (native) {
+    try {
+      const file = await native.openFile('project');
+      if (!file) return;
+      loadProjectJson(JSON.parse(file.text));
+      markDirty();
+    } catch (e) {
+      toast('Could not open project: ' + e.message, 'err');
+    }
+    return;
+  }
+  $('fileInput').click();
+}
+$('fileInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    loadProjectJson(JSON.parse(await file.text()));
+    markDirty();
+  } catch (err) {
+    toast('Not a valid Neku project: ' + err.message, 'err');
+  }
+  e.target.value = '';
+});
+
+async function loadSample(file) {
+  try {
+    loadProjectJson(await (await fetch(`../projects/${file}.json`)).json());
+    markDirty();
+  } catch (e) {
+    toast('Could not load sample: ' + e.message, 'err');
+  }
+}
+
+function saveProject() {
+  download(slug(ed.project.name) + '.neku', JSON.stringify(serializeProject(), null, 2));
+  status('project saved as .neku');
+}
+
+async function exportHtml() {
+  const t0 = performance.now();
+  try {
+    const html = await buildExport(serializeProject(), fetchRepoFile);
+    download(slug(ed.project.name) + '.html', html, 'text/html');
+    output.log(`export HTML: ${slug(ed.project.name)}.html — ${(html.length / 1024).toFixed(1)} KB in ${Math.round(performance.now() - t0)} ms`);
+    plugins.emit('export', { kind: 'html' });
+    dock.activate('output');
+    toast('Exported HTML — ' + (html.length / 1024).toFixed(0) + ' KB', 'ok');
+  } catch (e) {
+    toast('Export failed: ' + e.message, 'err');
+    output.log('export FAILED: ' + e.message);
+  }
+}
+
+async function exportItchZip() {
+  const t0 = performance.now();
+  try {
+    const bytes = await buildZip(serializeProject(), fetchRepoFile);
+    downloadBytes(slug(ed.project.name) + '.zip', bytes, 'application/zip');
+    output.log(`export itch.io ZIP: ${slug(ed.project.name)}.zip — ${(bytes.length / 1024).toFixed(1)} KB in ${Math.round(performance.now() - t0)} ms`);
+    plugins.emit('export', { kind: 'zip' });
+    dock.activate('output');
+    toast('Exported itch.io ZIP', 'ok');
+  } catch (e) {
+    toast('Export failed: ' + e.message, 'err');
+    output.log('export FAILED: ' + e.message);
+  }
+}
+
+async function exportDesktop() {
+  const t0 = performance.now();
+  dock.activate('output');
+  output.log('desktop export: building mac / windows / linux…');
+  const note = toast('Building desktop apps… (first run downloads the player binaries)', 'info', 60000);
+  try {
+    const zips = await buildDesktopApps(serializeProject(), fetchRepoFile, fetchRepoBytes, (m) => output.log(m));
+    for (const z of zips) {
+      downloadBytes(z.name, z.bytes, 'application/zip');
+      output.log(`desktop export: ${z.name} — ${(z.bytes.length / 1048576).toFixed(1)} MB`);
+    }
+    output.log(`desktop export done in ${Math.round(performance.now() - t0)} ms`);
+    plugins.emit('export', { kind: 'desktop' });
+    toast('Desktop apps exported for macOS, Windows, Linux', 'ok', 4500);
+  } catch (e) {
+    toast('Desktop export failed: ' + e.message, 'err', 5000);
+    output.log('desktop export FAILED: ' + e.message);
+  } finally {
+    note.remove();
+  }
+}
+
+function exportPrefab() {
+  if (!ed.sel || !ed.sel.parent) return toast('Select a node first', 'warn');
+  download(slug(ed.sel.name) + '.nkp', JSON.stringify({ neku: 'prefab', name: ed.sel.name, node: serialize(ed.sel) }, null, 2));
+}
+
+async function importPrefab() {
+  const file = native ? await native.openFile('prefab') : await pickWebFile('.nkp,.json');
+  if (!file) return;
+  try {
+    const p = JSON.parse(file.text);
+    if (p.neku !== 'prefab') throw new Error('not a .nkp prefab');
+    (ed.project.prefabs ||= {})[p.name] = p.node;
+    markDirty();
+    refreshAddMenu();
+    explorer.refresh();
+    output.log(`imported prefab "${p.name}"`);
+    toast(`Prefab "${p.name}" imported`, 'ok');
+  } catch (e) {
+    toast('Import failed: ' + e.message, 'err');
+  }
+}
+
+const LAYOUTS = {
+  'Default': [{ hierarchy: 'left', assets: 'left', inspector: 'right', script: 'bottom', console: 'bottom', timeline: 'bottom' }, { left: 230, right: 270, bottom: 240 }],
+  'Code': [{ hierarchy: 'left', assets: 'left', inspector: 'left', script: 'right', console: 'bottom', timeline: 'bottom' }, { left: 220, right: 480, bottom: 160 }],
+  'Animation': [{ hierarchy: 'left', assets: 'left', inspector: 'right', timeline: 'bottom', script: 'bottom', console: 'bottom' }, { left: 200, right: 260, bottom: 300 }],
+  'Art': [{ assets: 'right', hierarchy: 'left', inspector: 'right', script: 'bottom', console: 'bottom', timeline: 'bottom' }, { left: 200, right: 320, bottom: 180 }],
+};
+
 function showMainMenu() {
   openMainMenu({
     templates: () => plugins.templates,
@@ -1131,7 +1207,7 @@ function showMainMenu() {
       loadProjectJson(json);
       markDirty(false);
     },
-    openFile: () => $('btnOpen').click(),
+    openFile: () => openProject(),
     loadSample,
     loadRecent(name) {
       try {
@@ -1140,7 +1216,7 @@ function showMainMenu() {
         loadProjectJson(json);
         markDirty(false);
       } catch {
-        alert('Could not load recent project.');
+        toast('Could not load recent project', 'err');
       }
     },
   });
@@ -1148,38 +1224,129 @@ function showMainMenu() {
 
 $('logo').addEventListener('click', showMainMenu);
 
-$('btnTools').addEventListener('click', () =>
-  popupMenu($('btnTools'), [
-    { label: '🎨 Paint', desc: 'pixel sprite editor → saves to assets', action: () => openPaint(winman, ed) },
-    { label: '⚙ Settings', desc: 'custom theme · metadata · extensions', action: () => openSettings(winman, ed, themeContext()) },
-    { label: '🏠 Main menu', desc: 'templates · samples · recent projects', action: showMainMenu },
-    ...Object.entries(LAYOUTS).map(([name, [map, sizes]]) => ({
-      label: '▤ Layout: ' + name,
-      desc: '',
-      action: () => dock.applyPreset(map, sizes),
-    })),
-    ...plugins.tools.map((t) => ({
-      label: '⚡ ' + t.label,
-      desc: 'from ' + t.plugin + '.nkx',
-      action: () => t.fn(ed),
-    })),
-  ])
-);
-
 function openHelp() {
   $('helpOverlay').hidden = false;
   $('btnHelpClose').focus();
 }
 function closeHelp() {
   $('helpOverlay').hidden = true;
-  $('btnHelp').focus();
 }
-
-$('btnHelp').addEventListener('click', openHelp);
 $('helpOverlay').querySelectorAll('[data-help-close]').forEach((btn) => btn.addEventListener('click', closeHelp));
 $('helpOverlay').addEventListener('pointerdown', (e) => {
   if (e.target === $('helpOverlay')) closeHelp();
 });
+
+function aboutDlg() {
+  infoDlg({
+    title: 'ABOUT NEKU',
+    bodyHTML: `<div style="display:flex;gap:14px;align-items:center">
+      <img src="cwat.svg" alt=">w<" style="width:64px;height:64px;image-rendering:pixelated" />
+      <div><b>Neku Engine ${VERSION}</b><br>
+      <span style="color:var(--dim)">ultra-lightweight 2D/3D games &amp; apps<br>
+      mascot: cwat &gt;w&lt; · MIT · made for shipping silly ideas fast</span></div>
+    </div>`,
+  });
+}
+
+const MOD = navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+';
+
+const menubar = new MenuBar($('menubar'), () => [
+  {
+    label: 'File',
+    items: [
+      { label: 'New Project…', shortcut: MOD + 'N', action: showMainMenu },
+      { label: 'Open…', shortcut: MOD + 'O', action: openProject },
+      {
+        label: 'Open Recent', submenu: () =>
+          getJson('neku-recents', []).map((r) => ({
+            label: r.name,
+            action: () => {
+              const json = getJson('neku-recent:' + r.name, null);
+              if (json) { loadProjectJson(json); markDirty(false); }
+              else toast('Could not load recent project', 'err');
+            },
+          })),
+      },
+      {
+        label: 'Samples', submenu: () => [
+          { label: '🕹 Neku Arcade — 3D · CRT · Screen3D', action: () => loadSample('neku-arcade') },
+          { label: '🧮 Casino Calculator — 2D + 3D coin', action: () => loadSample('casino-calculator') },
+          { label: '🧱 Neku Breakout — 2D physics · ~50 KB', action: () => loadSample('neku-breakout') },
+        ],
+      },
+      { sep: true },
+      { label: 'Save Project (.neku)', shortcut: MOD + 'S', action: saveProject },
+      { sep: true },
+      { label: 'Import Asset…', action: () => $('assetInput').click() },
+      { label: 'Import Prefab (.nkp)…', action: importPrefab },
+      { sep: true },
+      {
+        label: 'Export', submenu: () => [
+          { label: '⬇ HTML file — one self-contained file', action: exportHtml },
+          { label: '⬇ itch.io ZIP — upload as HTML game', action: exportItchZip },
+          { label: '⬇ Desktop apps — macOS · Windows · Linux', action: exportDesktop },
+          { sep: true },
+          { label: '⬇ Prefab .nkp — selected node', action: exportPrefab, enabled: () => !!(ed.sel && ed.sel.parent) },
+        ],
+      },
+    ],
+  },
+  {
+    label: 'Edit',
+    items: [
+      { label: 'Undo', shortcut: MOD + 'Z', action: undo, enabled: () => undoStack.length > 0 },
+      { label: 'Redo', shortcut: '⇧' + MOD + 'Z', action: redo, enabled: () => redoStack.length > 0 },
+      { sep: true },
+      { label: 'Duplicate Node', shortcut: MOD + 'D', action: duplicateSel, enabled: () => !!(ed.sel && ed.sel.parent) },
+      { label: 'Rename Node…', shortcut: 'F2', action: () => ed.sel && renameNode(ed.sel), enabled: () => !!ed.sel },
+      { label: 'Delete Node', shortcut: '⌫', action: deleteSel, enabled: () => !!(ed.sel && ed.sel.parent) },
+    ],
+  },
+  {
+    label: 'View',
+    items: [
+      { label: '2D Viewport', shortcut: MOD + '1', action: () => setVpTab('2d'), checked: () => activeTab === '2d' },
+      { label: '3D Viewport', shortcut: MOD + '2', action: () => setVpTab('3d'), checked: () => activeTab === '3d' },
+      { label: 'Game', shortcut: MOD + '3', action: () => setVpTab('game'), checked: () => activeTab === 'game' },
+      { sep: true },
+      {
+        label: 'Layout', submenu: () =>
+          Object.entries(LAYOUTS).map(([name, [map, sizes]]) => ({
+            label: name,
+            action: () => dock.applyPreset(map, sizes),
+          })),
+      },
+    ],
+  },
+  {
+    label: 'Project',
+    items: [
+      { label: 'Project Settings…', action: () => openProjectSettings(winman, ed) },
+      { label: 'Co-op (Team Create)…', action: () => openCoop(winman, ed, collab) },
+    ],
+  },
+  {
+    label: 'Tools',
+    items: [
+      { label: '🎨 Paint', action: () => openPaint(winman, ed) },
+      ...plugins.tools.map((t) => ({ label: '⚡ ' + t.label, action: () => t.fn(ed) })),
+      { sep: true },
+      { label: 'Extensions (.nkx)…', action: () => openPreferences(winman, ed, prefsContext(), 'extensions') },
+      { label: 'Preferences…', action: () => openPreferences(winman, ed, prefsContext()) },
+    ],
+  },
+  {
+    label: 'Help',
+    items: [
+      { label: 'Cheatsheet', shortcut: '?', action: openHelp },
+      { label: 'API Reference', action: () => window.open('https://github.com/deviverr/NEKU-Engine/blob/main/docs/API.md', '_blank') },
+      { label: 'Publishing Guide', action: () => window.open('https://github.com/deviverr/NEKU-Engine/blob/main/docs/PUBLISHING.md', '_blank') },
+      { sep: true },
+      { label: 'GitHub', action: () => window.open('https://github.com/deviverr/NEKU-Engine', '_blank') },
+      { label: 'About Neku…', action: aboutDlg },
+    ],
+  },
+]);
 
 // --------------------------------------------------------------- keyboard
 
@@ -1187,11 +1354,21 @@ window.addEventListener('keydown', (e) => {
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName) ||
     document.activeElement?.closest('.cm-editor');
   const mod = e.metaKey || e.ctrlKey;
-  if (e.key === 'Escape') { closePopup(); if (!$('helpOverlay').hidden) closeHelp(); }
+  if (e.key === 'Escape') { menubar.closeAll(); if (!$('helpOverlay').hidden) closeHelp(); }
   if (mod && e.key === 'Enter') { e.preventDefault(); playing ? stopPlay() : startPlay(); return; }
+  if (mod && e.key === 's') { e.preventDefault(); saveProject(); return; }
+  if (mod && e.key === 'o') { e.preventDefault(); openProject(); return; }
+  if (mod && ['1', '2', '3'].includes(e.key)) {
+    e.preventDefault();
+    setVpTab({ 1: '2d', 2: '3d', 3: 'game' }[e.key]);
+    return;
+  }
   if (inField || playing) return;
+  if (e.key === '?' ) { openHelp(); return; }
   if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
   if (mod && (e.key === 'Z' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); return; }
+  if (mod && e.key === 'd') { e.preventDefault(); duplicateSel(); return; }
+  if (e.key === 'F2' && ed.sel) { e.preventDefault(); renameNode(ed.sel); return; }
   if (!ed.sel) return;
   if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); deleteSel(); }
   const step = e.shiftKey ? 10 : 1;
@@ -1225,14 +1402,15 @@ function refreshAll() {
 ed.refreshAssets = refreshAssets;
 
 (async function boot() {
+  splash.set(48, 'checking for desktop shell…');
   native = await initNative().catch(() => null);
+  splash.set(60, 'loading extensions…');
   plugins.loadAll();
-  refreshPluginRegistry();
 
-  const themeName = getLocal('neku-theme', 'neku-dark');
-  $('themeSelect').value = themeName;
-  $('themeSelect').dispatchEvent(new Event('change'));
+  setTheme(getLocal('neku-theme', 'neku-dark'));
+  $('statusVer').textContent = `NEKU ${VERSION}${native ? ' · desktop' : ''}`;
 
+  splash.set(78, 'restoring project…');
   const saved = getLocal('neku-project') || getLocal('cce-project');
   let firstRun = false;
   if (saved) {
@@ -1243,6 +1421,7 @@ ed.refreshAssets = refreshAssets;
     try { loadProjectJson(await (await fetch('../projects/neku-arcade.json')).json()); }
     catch { loadProjectJson(emptyProjectJson()); }
   }
+  splash.set(92, 'warming up viewports…');
   if (firstRun) showMainMenu();
 
   (function loop(now) {
@@ -1253,4 +1432,7 @@ ed.refreshAssets = refreshAssets;
     }
     requestAnimationFrame(loop);
   })(performance.now());
+
+  splash.done();
+  status(VP_HINTS['2d']);
 })();
