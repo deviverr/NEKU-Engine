@@ -17,6 +17,10 @@ for (const dir of ['editor', 'engine', 'vendor', 'projects', 'docs']) {
   cpSync(join(root, dir), join(out, dir), { recursive: true });
 }
 
+// Player binaries so the hosted Studio (and desktop Studios) can build
+// desktop game exports by fetching them from Pages.
+cpSync(join(root, 'desktop', 'player'), join(out, 'desktop', 'player'), { recursive: true });
+
 copyFileSync(join(root, 'play.html'), join(out, 'play.html'));
 copyFileSync(join(root, 'README.md'), join(out, 'README.md'));
 copyFileSync(join(root, 'LICENSE'), join(out, 'LICENSE'));

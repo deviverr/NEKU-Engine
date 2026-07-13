@@ -50,3 +50,51 @@ builds for macOS / Windows / Linux.
 - [x] G7 v1.0.2: non-locking cheatsheet overlay + per-client/session local settings
 
 Execution order: A → F (testers get builds even if time runs short) → B → C → D → E → G.
+
+---
+
+# Neku 2.0 — the professional pass
+
+Goal: Studio that feels like a real tool (Godot/Photoshop-grade placement logic),
+co-op that works from anywhere on any platform, real 3D editing, Paint worth
+using, and one-click desktop game exports.
+
+## H. Studio shell 2.0
+- [x] H1 Menu bar (File/Edit/View/Project/Tools/Help) replacing loose toolbar buttons + Tools junk drawer
+- [x] H2 One logical home per feature: themes ONLY in Preferences; Project Settings window (display/physics/FX/metadata) split from editor Preferences; Inspector no longer doubles as project settings
+- [x] H3 Modal dialogs + toasts replace every alert/confirm/prompt
+- [x] H4 Boot splash with animated cwat + staged progress (web + desktop)
+- [x] H5 Status bar: contextual viewport hints, autosave time, co-op room, version
+- [x] H6 Shortcuts: ⌘S/⌘O/⌘D/F2/⌘1-2-3 + cheatsheet update
+
+## I. Co-op 2.0 (any platform, anywhere)
+- [x] I1 Hosted relay: Cloudflare Worker + Durable Object (relay/), rooms persist a week, free tier — wss://neku-coop.dedpul3000a.workers.dev
+- [x] I2 Protocol v2: doc syncs without assets; assets chunked (≤256 KB frames) and pushed only when changed
+- [x] I3 Room codes (NEKU-style 5 letters), Host/Join window, peer list with live selections
+- [x] I4 Auto-reconnect with backoff + ping keepalive; local server speaks the same protocol
+- [x] I5 Verified live: browser Studio hosted, external client joined + edited over the internet
+
+## J. 3D editor
+- [x] J1 Move/rotate/scale gizmos (TransformControls, vendored) with W/E/R keys
+- [x] J2 Snapping (toggle + shift), focus-on-selection (F), grid toggle
+- [x] J3 Visible, pickable markers for cameras, lights, empties
+- [x] J4 Material section with sliders (metalness/roughness/emissive/opacity) + edit-texture-in-Paint button
+- [x] J5 Grouped Inspector (Transform/Shape/Material/Physics/…)
+
+## K. Paint 2.0
+- [x] K1 Layers (add/delete/reorder/merge/visibility)
+- [x] K2 Tools: pencil, eraser, fill, picker, line, rect, circle, select/move
+- [x] K3 Undo/redo, content-preserving resize up to 128×128
+- [x] K4 Spritesheet frames: boundaries, animated preview, onion skin
+
+## L. Desktop game export
+- [x] L1 Export → Desktop apps from the Studio (browser or native): mac/win/linux zips
+- [x] L2 Zero-dep asar (resources.neu) writer + zip with Unix exec bits
+- [x] L3 Player binaries tracked in desktop/player + served from Pages for hosted Studios
+- [x] L4 CLI twin: node tools/export-desktop.js project.neku
+- [x] L5 Verified: exported mac app boots and runs
+
+## M. Release
+- [x] M1 Vendor rebuild pinned to three 0.166.1 (+TransformControls), tools/build-vendor.js
+- [x] M2 Full verification pass (browser flows, relay, local server, desktop Studio + game boot)
+- [x] M3 v2.0.0: push, tag, GitHub Release with Studio zips + samples

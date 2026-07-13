@@ -1,0 +1,12 @@
+// Neku co-op relay — deploy with: cd relay && npx wrangler deploy
+{
+  "$schema": "https://www.unpkg.com/wrangler/config-schema.json",
+  "name": "neku-coop",
+  "main": "worker.js",
+  "compatibility_date": "2026-07-01",
+  "durable_objects": {
+    "bindings": [{ "name": "NEKU_ROOM", "class_name": "NekuRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NekuRoom"] }],
+  "observability": { "enabled": true }
+}

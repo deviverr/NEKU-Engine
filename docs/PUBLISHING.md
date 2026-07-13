@@ -22,9 +22,14 @@ Tips: name an asset `icon.png` for a favicon · fill **Settings → Project meta
 
 ## Your game as a desktop app
 
-Wrap the exported HTML with [Tauri](https://tauri.app) (`npm create tauri-app`, point it
-at the file) for ~3–8 MB installers, or reuse Neku's own Neutralino setup: copy
-`desktop/`, replace `resources` with your exported game, `npm run desktop`.
+Built in: **File → Export → Desktop apps** in the Studio produces
+`<game>-{macos,windows,linux}.zip` — a native Neutralino app with your game's
+name, window size, and icon (name an image asset `icon.png`). Works from the
+browser Studio, the hosted Studio, and the desktop Studio; no tooling installed.
+CLI twin: `node tools/export-desktop.js mygame.neku`.
+
+Prefer another wrapper? The exported HTML also drops straight into
+[Tauri](https://tauri.app) (`npm create tauri-app`) for ~3–8 MB installers.
 
 ## Neku Studio itself on itch.io (as a tool)
 

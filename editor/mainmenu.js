@@ -64,7 +64,7 @@ export const TEMPLATES = {
   },
 };
 
-const VERSION = '1.0.2';
+export const VERSION = '2.0.0';
 
 export function recordRecent(name, json) {
   try {
@@ -92,10 +92,10 @@ export function openMainMenu(ctx) {
       <div id="mmLeft">
         <img src="cwat.svg" alt=">w<" id="mmCat" />
         <div id="mmTitle">NEKU<br>ENGINE</div>
-        <div id="mmVer">v${VERSION} “cwat” · ultra-light games &amp; apps</div>
+        <div id="mmVer">v${VERSION} · ultra-light games &amp; apps</div>
         <div id="mmLinks">
           <a href="https://github.com/deviverr/NEKU-Engine" target="_blank">github</a> ·
-          <span class="mm-help">cheatsheet: ? in the toolbar</span>
+          <span class="mm-help">cheatsheet: Help → Cheatsheet (or ?)</span>
         </div>
       </div>
       <div id="mmRight">

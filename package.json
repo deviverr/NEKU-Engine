@@ -1,6 +1,6 @@
 {
   "name": "neku-engine",
-  "version": "1.0.2",
+  "version": "2.0.0",
   "description": "Neku Engine — 2D/3D web game engine with a pixel-UI browser editor, live team co-op, CRT effects, and single-file HTML export.",
   "type": "module",
   "license": "MIT",

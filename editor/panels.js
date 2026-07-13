@@ -1,5 +1,7 @@
 // Neku Studio — Explorer (project browser + multi-scene), Errors, Output.
 
+import { confirmDlg, promptDlg } from './dialogs.js';
+
 export class ExplorerPanel {
   constructor(el, ed, hooks) {
     this.ed = ed;
@@ -52,9 +54,9 @@ export class ExplorerPanel {
       })
     );
     $$('[data-delscene]').forEach((b) =>
-      b.addEventListener('click', () => {
+      b.addEventListener('click', async () => {
         const name = b.dataset.delscene;
-        if (!confirm(`Delete scene "${name}"?`)) return;
+        if (!(await confirmDlg({ title: 'DELETE SCENE', message: `Delete scene "${name}"?`, okText: 'Delete', danger: true }))) return;
         const p = this.ed.project;
         p.scenes = p.scenes.filter((s) => s.name !== name);
         if (p.mainScene === name) p.mainScene = p.scenes[0].name;
@@ -67,9 +69,9 @@ export class ExplorerPanel {
     $$('[data-asset]').forEach((r) => r.addEventListener('click', () => this.hooks.showPanel('assets')));
     $$('[data-anim]').forEach((r) => r.addEventListener('click', () => this.hooks.selectAnim(r.dataset.anim)));
     $$('[data-add]').forEach((b) =>
-      b.addEventListener('click', () => {
+      b.addEventListener('click', async () => {
         if (b.dataset.add === 'scene') {
-          const name = prompt('Scene name', 'Scene' + (this.ed.project.scenes.length + 1));
+          const name = await promptDlg({ title: 'NEW SCENE', label: 'Scene name', value: 'Scene' + (this.ed.project.scenes.length + 1) });
           if (!name || this.ed.project.scenes.some((s) => s.name === name)) return;
           this.ed.project.scenes.push({ name, root: this.hooks.hydrate({ type: 'Node', name }) });
           this.ed.currentScene = name;

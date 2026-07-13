@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Neku co-op server — Team Create for Neku Studio.
+// Neku co-op server — Team Create for Neku Studio, self-hosted / LAN edition.
 // Zero dependencies: WebSocket (RFC 6455) implemented by hand on node:http.
 //
 //   npm run coop            # listens on ws://localhost:8348
 //   node tools/collab.js --port 9000
 //
-// Rooms hold the latest project doc; everyone in a room edits it live.
-// Protocol: see editor/collab.js.
+// Speaks the same protocol v2 as the hosted relay (relay/worker.js): the doc
+// syncs without assets; assets sync separately in chunks. See editor/collab.js.
 
 import { createServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
@@ -15,10 +15,10 @@ const port = Number(process.argv[process.argv.indexOf('--port') + 1]) || 8348;
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const COLORS = ['#29e6c4', '#ff5c9e', '#ffcb47', '#4ade80', '#5fa8e0', '#c084fc', '#fb923c', '#f87171'];
 
-const rooms = new Map(); // name -> { clients: Map<id, client>, doc, v }
+const rooms = new Map(); // name -> { clients: Map<id, client>, doc, v, assets: Map<name, {of, parts[]}> }
 
 function room(name) {
-  if (!rooms.has(name)) rooms.set(name, { clients: new Map(), doc: null, v: 0 });
+  if (!rooms.has(name)) rooms.set(name, { clients: new Map(), doc: null, v: 0, assets: new Map() });
   return rooms.get(name);
 }
 
@@ -93,7 +93,10 @@ server.on('upgrade', (req, sock) => {
     `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
   );
 
-  const client = { id: randomUUID().slice(0, 8), sock, room: null, name: 'anon', color: COLORS[0], selName: null };
+  // Relay-style URLs (ws://host:port/room/CODE) preselect the room; the room
+  // in the hello message still wins if present.
+  const urlRoom = (req.url || '').match(/^\/room\/([A-Za-z0-9-]{3,32})/)?.[1]?.toUpperCase() || null;
+  const client = { id: randomUUID().slice(0, 8), sock, room: null, urlRoom, name: 'anon', color: COLORS[0], selName: null };
   let buf = Buffer.alloc(0);
 
   sock.on('data', (chunk) => {
@@ -124,12 +127,17 @@ function peerList(r) {
 
 function handle(client, m) {
   if (m.t === 'hello') {
-    const r = room(String(m.room || 'default'));
+    const r = room(String(m.room || client.urlRoom || 'default'));
     client.room = r;
     client.name = String(m.name || 'anon').slice(0, 24);
-    client.color = COLORS[r.clients.size % COLORS.length];
+    const taken = new Set([...r.clients.values()].map((c) => c.color));
+    client.color = COLORS.find((c) => !taken.has(c)) || COLORS[r.clients.size % COLORS.length];
     r.clients.set(client.id, client);
     send(client, { t: 'welcome', id: client.id, color: client.color, peers: peerList(r), doc: r.doc, v: r.v });
+    for (const [name, a] of r.assets) {
+      a.parts.forEach((data, part) => send(client, { t: 'asset', name, part, of: a.of, data }));
+    }
+    send(client, { t: 'assetsDone' });
     broadcast(r, { t: 'peers', peers: peerList(r) }, client.id);
     log(`${client.name} joined "${[...rooms.entries()].find(([, v]) => v === r)?.[0]}" (${r.clients.size} online)`);
     return;
@@ -141,6 +149,20 @@ function handle(client, m) {
     r.v += 1;
     send(client, { t: 'ack', v: r.v });
     broadcast(r, { t: 'doc', doc: r.doc, v: r.v, from: client.id }, client.id);
+  } else if (m.t === 'asset') {
+    const name = String(m.name || '').slice(0, 200);
+    if (!name || typeof m.data !== 'string') return;
+    const of = Math.max(1, m.of | 0), part = m.part | 0;
+    let a = r.assets.get(name);
+    if (!a || a.of !== of || part === 0) {
+      a = { of, parts: [] };
+      r.assets.set(name, a);
+    }
+    a.parts[part] = m.data;
+    broadcast(r, { t: 'asset', name, part, of, data: m.data }, client.id);
+  } else if (m.t === 'assetDel') {
+    r.assets.delete(String(m.name || ''));
+    broadcast(r, { t: 'assetDel', name: m.name }, client.id);
   } else if (m.t === 'presence') {
     client.selName = m.selName || null;
     broadcast(r, { t: 'presence', id: client.id, name: client.name, color: client.color, selName: client.selName }, client.id);
