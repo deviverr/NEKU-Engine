@@ -37,22 +37,40 @@ export class Physics2D {
     };
     walk(root);
 
+    // Substep so fast bodies can't tunnel through thin colliders: no body may
+    // move more than MAX_MOVE px per substep (a breakout ball at 430 px/s on a
+    // laggy 50 ms frame would otherwise skip clean through a 14 px paddle).
+    const MAX_MOVE = 6;
+    let fastest = 0;
     for (const n of dynamics) {
-      n.vx = n.vx || 0;
-      n.vy = (n.vy || 0) + this.gravity * (n.gravityScale ?? 1) * dt;
-      n._grounded = false;
+      const g = this.gravity * (n.gravityScale ?? 1) * dt;
+      fastest = Math.max(fastest, Math.abs(n.vx || 0), Math.abs((n.vy || 0) + g));
+    }
+    const steps = Math.min(12, Math.max(1, Math.ceil((fastest * dt) / MAX_MOVE)));
+    const h = dt / steps;
 
-      // X axis
-      n.x += n.vx * dt;
-      this._resolveAxis(n, statics, 'x', emit);
-      // Y axis
-      n.y += n.vy * dt;
-      this._resolveAxis(n, statics, 'y', emit);
+    for (let s = 0; s < steps; s++) {
+      for (const n of dynamics) {
+        if (n._dead) continue;
+        n.vx = n.vx || 0;
+        n.vy = (n.vy || 0) + this.gravity * (n.gravityScale ?? 1) * h;
+        if (s === 0) n._grounded = false;
 
-      // Overlap events (areas + other dynamics)
+        // X axis
+        n.x += n.vx * h;
+        this._resolveAxis(n, statics, 'x', emit);
+        // Y axis
+        n.y += n.vy * h;
+        this._resolveAxis(n, statics, 'y', emit);
+      }
+    }
+
+    // Overlap events (areas + other dynamics), once per frame
+    for (const n of dynamics) {
+      if (n._dead) continue;
       const a = this._bounds(n, this._worldPos(n));
       for (const other of [...areas, ...dynamics]) {
-        if (other === n) continue;
+        if (other === n || other._dead) continue;
         const b = this._bounds(other, this._worldPos(other));
         if (a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y) {
           emit(n, other, 'overlap');
@@ -84,6 +102,7 @@ export class Physics2D {
     const a = this._bounds(n, wp);
     let boxes = [];
     for (const s of statics) {
+      if (s._dead) continue; // destroyed mid-frame (e.g. a breakout brick)
       if (s.type === 'Tilemap') boxes.push(...this._tiles(s, a));
       else {
         const b = this._bounds(s, this._worldPos(s));
@@ -97,16 +116,22 @@ export class Physics2D {
         const push = n.vx > 0 ? b.x - (a.x + a.w) : b.x + b.w - a.x;
         n.x += push;
         a.x += push;
-        emit(n, b.node, n.vx > 0 ? 'right' : 'left');
+        const side = n.vx > 0 ? 'right' : 'left';
         n.vx = -n.vx * (n.bounce ?? 0);
+        // Bounce first, notify after: onCollide sees the post-bounce state and
+        // anything it sets (e.g. a paddle angling the ball back) is final.
+        emit(n, b.node, side);
       } else {
         const push = n.vy > 0 ? b.y - (a.y + a.h) : b.y + b.h - a.y;
         n.y += push;
         a.y += push;
-        emit(n, b.node, n.vy > 0 ? 'bottom' : 'top');
+        const side = n.vy > 0 ? 'bottom' : 'top';
         if (n.vy > 0) n._grounded = true;
         n.vy = -n.vy * (n.bounce ?? 0);
-        if (Math.abs(n.vy) < 20) n.vy = 0;
+        // Rest-snap stops micro-bouncing on floors — but only for bodies that
+        // gravity pulls; a zero-g bounce ball must keep its speed.
+        if (Math.abs(n.vy) < 20 && (n.gravityScale ?? 1) !== 0) n.vy = 0;
+        emit(n, b.node, side);
       }
     }
   }
